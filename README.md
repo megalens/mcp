@@ -5,7 +5,7 @@ Multi-engine code analysis inside your IDE. MegaLens runs your code through spec
 ## Quick Start
 
 ```bash
-npm install -g @megalens/mcp
+npm install -g megalens-mcp
 megalens-mcp setup
 ```
 

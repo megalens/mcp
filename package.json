@@ -7,7 +7,7 @@
   "homepage": "https://megalens.ai/extensions/mcp",
   "repository": {
     "type": "git",
-    "url": "https://github.com/megalens-ai/mcp"
+    "url": "https://github.com/megalens/mcp"
   },
   "keywords": [
     "mcp",
