@@ -193,14 +193,14 @@ async function validateToken(token) {
       console.log('\n  Token is valid.')
       console.log(`  Plan: ${data.plan_code}`)
       console.log(`  Pro:  ${data.is_pro ? 'Yes' : 'No'}\n`)
-      return true
+      return { valid: true, isPro: !!data.is_pro }
     } else {
       console.error(`\n  Token invalid: ${data.error}\n`)
-      return false
+      return { valid: false, isPro: false }
     }
   } catch (err) {
     console.error(`\n  Connection failed: ${err.message}\n`)
-    return false
+    return { valid: false, isPro: false }
   }
 }
 
@@ -214,23 +214,26 @@ async function cmdSetup() {
     process.exit(1)
   }
 
-  // 2. Validate
+  // 2. Validate and detect plan
   console.log('\n  Validating token...')
-  const valid = await validateToken(token)
-  if (!valid) {
+  const result = await validateToken(token)
+  if (!result.valid) {
     const cont = await ask('  Continue anyway? (y/N): ')
     if (cont.toLowerCase() !== 'y') process.exit(1)
   }
 
-  // 3. BYOK — optional OpenRouter key for free-tier users
+  // 3. BYOK — only ask free-tier users for OpenRouter key
   let openrouterKey = null
-  const wantByok = await ask('  Do you have your own OpenRouter API key? (y/N): ')
-  if (wantByok.toLowerCase() === 'y') {
+  if (!result.isPro) {
+    console.log('  Free plan detected. You need an OpenRouter API key to use MegaLens.')
+    console.log('  Get one at https://openrouter.ai/keys\n')
     openrouterKey = await ask('  Enter your OpenRouter key (sk-or-v1-...): ', { hidden: true })
     if (!openrouterKey.startsWith('sk-or-')) {
-      console.log('  Doesn\'t look like an OpenRouter key. Skipping BYOK.')
+      console.log('  Doesn\'t look like an OpenRouter key. You can add it later in your config file.')
       openrouterKey = null
     }
+  } else {
+    console.log('  Pro plan — no API keys needed. MegaLens handles routing.\n')
   }
 
   // 4. Detect tools
@@ -295,7 +298,8 @@ async function cmdValidate() {
     console.log(`\n  Found token in config: ml_tok_****`)
   }
 
-  await validateToken(token)
+  const { valid } = await validateToken(token)
+  if (!valid) process.exitCode = 1
 }
 
 async function cmdConfig() {
