@@ -77,19 +77,20 @@ async function writeJson(path, data) {
 
 // ── Tool detection ──
 
+function mcpEntry(token, openrouterKey) {
+  const headers = { Authorization: `Bearer ${token}` }
+  if (openrouterKey) headers['x-megalens-openrouter-key'] = openrouterKey
+  return { url: MCP_URL, headers }
+}
+
 const TOOLS = [
   {
     name: 'Claude Code',
     configPaths: [
       join(homedir(), '.claude.json'),
     ],
-    shape: (token) => ({
-      mcpServers: {
-        megalens: {
-          url: MCP_URL,
-          headers: { Authorization: `Bearer ${token}` },
-        },
-      },
+    shape: (token, orKey) => ({
+      mcpServers: { megalens: mcpEntry(token, orKey) },
     }),
     merge: (existing, fragment) => ({
       ...existing,
@@ -97,20 +98,13 @@ const TOOLS = [
     }),
   },
   {
-    name: 'Codex',
+    name: 'Codex CLI',
     configPaths: [
       join(homedir(), '.codex', 'config.json'),
       join(homedir(), '.config', 'codex', 'config.json'),
     ],
-    shape: (token) => ({
-      mcp: {
-        servers: {
-          megalens: {
-            url: MCP_URL,
-            headers: { Authorization: `Bearer ${token}` },
-          },
-        },
-      },
+    shape: (token, orKey) => ({
+      mcp: { servers: { megalens: mcpEntry(token, orKey) } },
     }),
     merge: (existing, fragment) => ({
       ...existing,
@@ -118,6 +112,58 @@ const TOOLS = [
         ...(existing.mcp || {}),
         servers: { ...(existing.mcp?.servers || {}), ...fragment.mcp.servers },
       },
+    }),
+  },
+  {
+    name: 'Cursor',
+    configPaths: [
+      join(homedir(), '.cursor', 'mcp.json'),
+    ],
+    shape: (token, orKey) => ({
+      mcpServers: { megalens: mcpEntry(token, orKey) },
+    }),
+    merge: (existing, fragment) => ({
+      ...existing,
+      mcpServers: { ...(existing.mcpServers || {}), ...fragment.mcpServers },
+    }),
+  },
+  {
+    name: 'Gemini CLI',
+    configPaths: [
+      join(homedir(), '.gemini', 'settings.json'),
+    ],
+    shape: (token, orKey) => ({
+      mcpServers: { megalens: mcpEntry(token, orKey) },
+    }),
+    merge: (existing, fragment) => ({
+      ...existing,
+      mcpServers: { ...(existing.mcpServers || {}), ...fragment.mcpServers },
+    }),
+  },
+  {
+    name: 'VS Code (Copilot)',
+    configPaths: [
+      join(process.cwd(), '.vscode', 'mcp.json'),
+    ],
+    shape: (token, orKey) => ({
+      servers: { megalens: mcpEntry(token, orKey) },
+    }),
+    merge: (existing, fragment) => ({
+      ...existing,
+      servers: { ...(existing.servers || {}), ...fragment.servers },
+    }),
+  },
+  {
+    name: 'Windsurf',
+    configPaths: [
+      join(homedir(), '.codeium', 'windsurf', 'mcp_config.json'),
+    ],
+    shape: (token, orKey) => ({
+      mcpServers: { megalens: mcpEntry(token, orKey) },
+    }),
+    merge: (existing, fragment) => ({
+      ...existing,
+      mcpServers: { ...(existing.mcpServers || {}), ...fragment.mcpServers },
     }),
   },
 ]
@@ -176,34 +222,50 @@ async function cmdSetup() {
     if (cont.toLowerCase() !== 'y') process.exit(1)
   }
 
-  // 3. Detect tools
+  // 3. BYOK — optional OpenRouter key for free-tier users
+  let openrouterKey = null
+  const wantByok = await ask('  Do you have your own OpenRouter API key? (y/N): ')
+  if (wantByok.toLowerCase() === 'y') {
+    openrouterKey = await ask('  Enter your OpenRouter key (sk-or-v1-...): ', { hidden: true })
+    if (!openrouterKey.startsWith('sk-or-')) {
+      console.log('  Doesn\'t look like an OpenRouter key. Skipping BYOK.')
+      openrouterKey = null
+    }
+  }
+
+  // 4. Detect tools
   const tools = await detectTools()
 
   if (tools.length === 0) {
-    console.log('  No supported tools detected (Claude Code, Codex).')
-    console.log('  You can manually add the MCP config. See: https://megalens.ai/app/settings/mcp\n')
+    console.log('  No supported tools detected.')
+    console.log('  Supported: Claude Code, Codex CLI, Cursor, Gemini CLI, VS Code, Windsurf')
+    console.log('  Manual setup: https://megalens.ai/integrations\n')
 
-    // Offer to create .claude.json anyway
-    const create = await ask('  Create ~/.claude.json for Claude Code? (Y/n): ')
-    if (create.toLowerCase() !== 'n') {
-      const tool = TOOLS[0]
+    const choices = TOOLS.map((t, i) => `    ${i + 1}. ${t.name}`).join('\n')
+    console.log('  Which tool do you want to configure?\n' + choices)
+    const pick = await ask('\n  Enter number (or press Enter to skip): ')
+    const idx = parseInt(pick, 10) - 1
+    if (idx >= 0 && idx < TOOLS.length) {
+      const tool = TOOLS[idx]
       const path = tool.configPaths[0]
-      const fragment = tool.shape(token)
+      const dir = path.substring(0, path.lastIndexOf('/'))
+      await mkdir(dir, { recursive: true }).catch(() => {})
+      const fragment = tool.shape(token, openrouterKey)
       await writeJson(path, fragment)
       console.log(`\n  Created ${path}`)
-      console.log('  Restart Claude Code to activate MegaLens.\n')
+      console.log(`  Restart ${tool.name} to activate MegaLens.\n`)
     }
     return
   }
 
-  // 4. Write config for each detected tool
+  // 5. Write config for each detected tool
   for (const tool of tools) {
     console.log(`\n  Found: ${tool.name} (${tool.activePath})`)
     const proceed = await ask(`  Add MegaLens to ${tool.name}? (Y/n): `)
     if (proceed.toLowerCase() === 'n') continue
 
     const existing = (await readJson(tool.activePath)) || {}
-    const fragment = tool.shape(token)
+    const fragment = tool.shape(token, openrouterKey)
     const merged = tool.merge(existing, fragment)
 
     await writeJson(tool.activePath, merged)
@@ -241,7 +303,8 @@ async function cmdConfig() {
   const tools = await detectTools()
 
   if (tools.length === 0) {
-    console.log('  No configured tools found.\n')
+    console.log('  No configured tools found.')
+    console.log('  Run `megalens-mcp setup` to get started.\n')
     return
   }
 

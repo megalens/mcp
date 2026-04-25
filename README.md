@@ -1,24 +1,35 @@
 # megalens-mcp
 
-Multi-engine code analysis inside your IDE. MegaLens runs your code through specialist debate engines and delivers a judge-verified verdict — all from your existing AI tool.
+Multi-engine code review inside your IDE. MegaLens reviews your code through specialist debate engines and delivers a judge-verified verdict — all from your existing AI tool.
 
 ## Quick Start
 
 ```bash
-npm install -g megalens-mcp
-megalens-mcp setup
+npx megalens-mcp setup
 ```
 
 The setup wizard:
-1. Asks for your MegaLens token (get one at [megalens.ai/app/settings/mcp](https://megalens.ai/app/settings/mcp))
-2. Detects installed tools (Claude Code, Codex)
-3. Writes the config automatically
+1. Asks for your MegaLens token ([get one here](https://megalens.ai/app/settings/mcp))
+2. Optionally asks for your OpenRouter API key (free-tier BYOK users)
+3. Detects installed tools automatically
+4. Writes the correct config for each tool
+
+## Supported Tools
+
+| Tool | Config File | Auto-detected |
+|------|-------------|---------------|
+| Claude Code | `~/.claude.json` | Yes |
+| Codex CLI | `~/.codex/config.json` | Yes |
+| Cursor | `~/.cursor/mcp.json` | Yes |
+| Gemini CLI | `~/.gemini/settings.json` | Yes |
+| VS Code (Copilot) | `.vscode/mcp.json` | Yes |
+| Windsurf | `~/.codeium/windsurf/mcp_config.json` | Yes |
+
+If no tool is detected, the wizard lets you pick one and creates the config file.
 
 ## Manual Setup
 
-### Claude Code
-
-Add to `~/.claude.json` or `.mcp.json`:
+### Pro / PAYG users
 
 ```json
 {
@@ -33,55 +44,49 @@ Add to `~/.claude.json` or `.mcp.json`:
 }
 ```
 
-Or via CLI:
-
-```bash
-claude mcp add megalens --url https://megalens.ai/api/mcp --header "Authorization: Bearer ml_tok_your_token_here"
-```
-
-### Codex
-
-Add to your Codex project config:
+### Free / BYOK users
 
 ```json
 {
-  "mcp": {
-    "servers": {
-      "megalens": {
-        "url": "https://megalens.ai/api/mcp",
-        "headers": {
-          "Authorization": "Bearer ml_tok_your_token_here"
-        }
+  "mcpServers": {
+    "megalens": {
+      "url": "https://megalens.ai/api/mcp",
+      "headers": {
+        "Authorization": "Bearer ml_tok_your_token_here",
+        "x-megalens-openrouter-key": "sk-or-v1-your-openrouter-key"
       }
     }
   }
 }
 ```
 
+> **Note:** VS Code uses `"servers"` instead of `"mcpServers"`. Codex CLI uses `"mcp": { "servers": { ... } }`. The setup wizard handles these differences automatically.
+
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `megalens-mcp setup` | Interactive setup wizard |
+| `megalens-mcp setup` | Interactive setup — detect tools, write config |
 | `megalens-mcp validate` | Test your token connectivity |
 | `megalens-mcp config` | Show current config status |
 
 ## How It Works
 
-MegaLens automatically detects which AI tool is calling it:
+MegaLens detects which AI tool is calling it and adjusts the engine lineup:
 
-- **Claude Code user?** MegaLens skips Claude and brings in GPT, Gemini, and DeepSeek
-- **Codex user?** MegaLens skips GPT and brings in Claude, Gemini, and DeepSeek
+- **Claude Code?** MegaLens skips Claude, brings in GPT, Gemini, and DeepSeek
+- **Codex CLI?** MegaLens skips GPT, brings in Claude, Gemini, and DeepSeek
+- **Cursor?** MegaLens skips your active Cursor model, reviews with independent engines
 
-3 genuinely different viewpoints. Zero duplicate API calls. No credits wasted.
+3 genuinely different viewpoints. No duplicate API calls.
 
 ## Requirements
 
 - Node.js 18+
-- MegaLens account with Pro subscription or Pay-as-you-go balance — [megalens.ai](https://megalens.ai)
+- MegaLens account — [megalens.ai](https://megalens.ai)
 
 ## Links
 
 - [Dashboard](https://megalens.ai/app)
 - [MCP Settings](https://megalens.ai/app/settings/mcp)
-- [Documentation](https://megalens.ai/extensions/mcp)
+- [Integrations](https://megalens.ai/integrations)

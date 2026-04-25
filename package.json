@@ -16,7 +16,11 @@
     "multi-ai",
     "claude-code",
     "codex",
-    "cursor"
+    "cursor",
+    "gemini-cli",
+    "copilot",
+    "vscode",
+    "windsurf"
   ],
   "bin": {
     "megalens-mcp": "./bin/cli.mjs"
