@@ -24,13 +24,37 @@ function rl() {
   return createInterface({ input: process.stdin, output: process.stdout })
 }
 
-function ask(prompt) {
+function ask(prompt, { hidden = false } = {}) {
   const r = rl()
+  if (hidden) process.stdout.write(prompt)
   return new Promise((resolve) => {
-    r.question(prompt, (answer) => {
-      r.close()
-      resolve(answer.trim())
-    })
+    if (hidden) {
+      const original = process.stdin.setRawMode
+      if (process.stdin.isTTY) process.stdin.setRawMode(true)
+      let buf = ''
+      const onData = (ch) => {
+        const c = ch.toString()
+        if (c === '\n' || c === '\r') {
+          if (process.stdin.isTTY) process.stdin.setRawMode(false)
+          process.stdin.removeListener('data', onData)
+          process.stdout.write('\n')
+          r.close()
+          resolve(buf.trim())
+        } else if (c === '') {
+          process.exit(1)
+        } else if (c === '' || c === '\b') {
+          buf = buf.slice(0, -1)
+        } else {
+          buf += c
+        }
+      }
+      process.stdin.on('data', onData)
+    } else {
+      r.question(prompt, (answer) => {
+        r.close()
+        resolve(answer.trim())
+      })
+    }
   })
 }
 
@@ -138,7 +162,7 @@ async function cmdSetup() {
   console.log('\n  MegaLens MCP Setup\n')
 
   // 1. Get token
-  const token = await ask('  Enter your MegaLens token (ml_tok_...): ')
+  const token = await ask('  Enter your MegaLens token (ml_tok_...): ', { hidden: true })
   if (!token.startsWith('ml_tok_')) {
     console.error('  Invalid token format. Get your token at https://megalens.ai/app/settings/mcp\n')
     process.exit(1)
@@ -204,9 +228,9 @@ async function cmdValidate() {
   }
 
   if (!token) {
-    token = await ask('  Enter your MegaLens token: ')
+    token = await ask('  Enter your MegaLens token: ', { hidden: true })
   } else {
-    console.log(`\n  Found token in config: ${token.slice(0, 15)}...`)
+    console.log(`\n  Found token in config: ml_tok_****`)
   }
 
   await validateToken(token)
