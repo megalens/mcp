@@ -19,7 +19,7 @@ The setup wizard:
 | Tool | Config File | Auto-detected |
 |------|-------------|---------------|
 | Claude Code | `~/.claude.json` | Yes |
-| Codex CLI | `~/.codex/config.json` | Yes |
+| Codex CLI | `~/.codex/config.toml` | Yes |
 | Cursor | `~/.cursor/mcp.json` | Yes |
 | Gemini CLI | `~/.gemini/settings.json` | Yes |
 | VS Code (Copilot) | `.vscode/mcp.json` | Yes |
@@ -29,13 +29,30 @@ If no tool is detected, the wizard lets you pick one and creates the config file
 
 ## Manual Setup
 
-### Pro / PAYG users
+Every example below was checked against each vendor's own documentation, not copied from
+elsewhere. The differences between them are real — two config languages and three top-level keys —
+which is why the wizard exists.
+
+**Note the `?ide=` on each URL.** MegaLens picks engines by skipping your own tool's model — in
+Claude Code it brings GPT, Gemini and DeepSeek instead of Claude — and it can only do that if it
+knows which tool is calling. Measured across 94 real runs before this was added: **75 arrived
+unidentified**, so the feature could not work for them.
+
+### Claude Code
+
+```bash
+claude mcp add --transport http megalens "https://megalens.ai/api/mcp?ide=claude-code" \
+  --header "Authorization: Bearer ml_tok_your_token_here"
+```
+
+Or in `.mcp.json` (project) / `~/.claude.json` (user):
 
 ```json
 {
   "mcpServers": {
     "megalens": {
-      "url": "https://megalens.ai/api/mcp",
+      "type": "http",
+      "url": "https://megalens.ai/api/mcp?ide=claude-code",
       "headers": {
         "Authorization": "Bearer ml_tok_your_token_here"
       }
@@ -44,23 +61,56 @@ If no tool is detected, the wizard lets you pick one and creates the config file
 }
 ```
 
-### Free / BYOK users
+### Cursor
+
+`~/.cursor/mcp.json` or `.cursor/mcp.json`. **No `type` field** — Cursor does not use one:
 
 ```json
 {
   "mcpServers": {
     "megalens": {
-      "url": "https://megalens.ai/api/mcp",
+      "url": "https://megalens.ai/api/mcp?ide=cursor",
       "headers": {
-        "Authorization": "Bearer ml_tok_your_token_here",
-        "x-megalens-openrouter-key": "sk-or-v1-your-openrouter-key"
+        "Authorization": "Bearer ml_tok_your_token_here"
       }
     }
   }
 }
 ```
 
-> **Note:** VS Code uses `"servers"` instead of `"mcpServers"`. Codex CLI uses `"mcp": { "servers": { ... } }`. The setup wizard handles these differences automatically.
+### VS Code / Copilot
+
+`.vscode/mcp.json`. **The top-level key is `servers`, not `mcpServers`** — a config written for
+Claude Code or Cursor will not be read here:
+
+```json
+{
+  "servers": {
+    "megalens": {
+      "type": "http",
+      "url": "https://megalens.ai/api/mcp?ide=copilot"
+    }
+  }
+}
+```
+
+### Codex
+
+`~/.codex/config.toml` or `.codex/config.toml`. **TOML, not JSON:**
+
+```toml
+[mcp_servers.megalens]
+url = "https://megalens.ai/api/mcp?ide=codex"
+http_headers = { "Authorization" = "Bearer ml_tok_your_token_here" }
+```
+
+### Adding your own OpenRouter key (free / BYOK)
+
+Add one more header alongside `Authorization`, in whichever shape your tool uses above:
+
+```
+"x-megalens-openrouter-key": "sk-or-v1-your-openrouter-key"
+```
 
 ## Commands
 

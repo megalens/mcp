@@ -16,6 +16,21 @@ import { createInterface } from 'readline'
 
 const API_BASE = 'https://megalens.ai'
 const MCP_URL = `${API_BASE}/api/mcp`
+
+/**
+ * Each tool gets a URL that says which tool it is.
+ *
+ * The server has a whole attribution chain for this -- an `x-megalens-caller`
+ * header, then `?ide=`, then User-Agent sniffing -- and this client was handing
+ * every tool the same bare URL. Measured on 94 real runs: **75 arrived as
+ * `unknown`**, which breaks the feature this README leads with. MegaLens picks
+ * engines by skipping the caller's own model ("Claude Code? MegaLens skips
+ * Claude"), and it cannot skip a host it was never told about.
+ *
+ * `?ide=` rather than a header because it survives every config format here,
+ * including Codex's TOML and VS Code's, where header support is not documented.
+ */
+const mcpUrlFor = (ide) => `${MCP_URL}?ide=${ide}`
 const VALIDATE_URL = `${API_BASE}/api/mcp/validate`
 
 // ── Helpers ──
@@ -62,11 +77,27 @@ async function fileExists(path) {
   try { await access(path); return true } catch { return false }
 }
 
+/**
+ * Read a config file, distinguishing "not there" from "there and unreadable".
+ *
+ * These were the same value before, and the caller turned both into `{}` and wrote over the file.
+ * A VS Code `mcp.json` with a `// comment` in it — which VS Code permits and people write — failed
+ * `JSON.parse`, became an empty object, and the customer's existing MCP servers were deleted by our
+ * installer while it printed success. Found in audit and reproduced against a disposable config.
+ */
 async function readJson(path) {
+  let raw
   try {
-    const raw = await readFile(path, 'utf-8')
-    return JSON.parse(raw)
-  } catch { return null }
+    raw = await readFile(path, 'utf-8')
+  } catch {
+    return { missing: true, data: null }
+  }
+  if (raw.trim() === '') return { missing: true, data: null }
+  try {
+    return { missing: false, data: JSON.parse(raw) }
+  } catch (err) {
+    return { missing: false, data: null, unreadable: String(err?.message ?? err) }
+  }
 }
 
 async function writeJson(path, data) {
@@ -77,20 +108,17 @@ async function writeJson(path, data) {
 
 // ── Tool detection ──
 
-function mcpEntry(token, openrouterKey) {
-  const headers = { Authorization: `Bearer ${token}` }
-  if (openrouterKey) headers['x-megalens-openrouter-key'] = openrouterKey
-  return { url: MCP_URL, headers }
-}
-
 const TOOLS = [
   {
     name: 'Claude Code',
+    format: 'json',
     configPaths: [
       join(homedir(), '.claude.json'),
     ],
-    shape: (token, orKey) => ({
-      mcpServers: { megalens: mcpEntry(token, orKey) },
+    shape: (token) => ({
+      mcpServers: {
+        megalens: { type: 'http', url: mcpUrlFor('claude-code'), headers: { Authorization: `Bearer ${token}` } },
+      },
     }),
     merge: (existing, fragment) => ({
       ...existing,
@@ -99,28 +127,40 @@ const TOOLS = [
   },
   {
     name: 'Codex CLI',
+    format: 'toml',
     configPaths: [
-      join(homedir(), '.codex', 'config.json'),
-      join(homedir(), '.config', 'codex', 'config.json'),
+      join(homedir(), '.codex', 'config.toml'),
+      join(homedir(), '.config', 'codex', 'config.toml'),
     ],
-    shape: (token, orKey) => ({
-      mcp: { servers: { megalens: mcpEntry(token, orKey) } },
-    }),
-    merge: (existing, fragment) => ({
-      ...existing,
-      mcp: {
-        ...(existing.mcp || {}),
-        servers: { ...(existing.mcp?.servers || {}), ...fragment.mcp.servers },
-      },
-    }),
+    toml: (token) =>
+      `\n[mcp_servers.megalens]\nurl = "${mcpUrlFor('codex')}"\nhttp_headers = { "Authorization" = "Bearer ${token}" }\n`,
+  },
+  {
+    /**
+     * Grok Build — xAI's terminal coding agent. TOML like Codex, but the header
+     * table is `headers`, not Codex's `http_headers`. Verified against
+     * https://docs.x.ai/build/features/mcp-servers (remote HTTP server block).
+     * Equivalent one-liner, if the user prefers it:
+     *   grok mcp add --transport http megalens <url> --header "Authorization: Bearer <token>"
+     */
+    name: 'Grok Build',
+    format: 'toml',
+    configPaths: [
+      join(homedir(), '.grok', 'config.toml'),
+    ],
+    toml: (token) =>
+      `\n[mcp_servers.megalens]\nurl = "${mcpUrlFor('grok')}"\nheaders = { "Authorization" = "Bearer ${token}" }\n`,
   },
   {
     name: 'Cursor',
+    format: 'json',
     configPaths: [
       join(homedir(), '.cursor', 'mcp.json'),
     ],
-    shape: (token, orKey) => ({
-      mcpServers: { megalens: mcpEntry(token, orKey) },
+    shape: (token) => ({
+      mcpServers: {
+        megalens: { url: mcpUrlFor('cursor'), headers: { Authorization: `Bearer ${token}` } },
+      },
     }),
     merge: (existing, fragment) => ({
       ...existing,
@@ -129,11 +169,14 @@ const TOOLS = [
   },
   {
     name: 'Gemini CLI',
+    format: 'json',
     configPaths: [
       join(homedir(), '.gemini', 'settings.json'),
     ],
-    shape: (token, orKey) => ({
-      mcpServers: { megalens: mcpEntry(token, orKey) },
+    shape: (token) => ({
+      mcpServers: {
+        megalens: { httpUrl: mcpUrlFor('gemini-cli'), headers: { Authorization: `Bearer ${token}` } },
+      },
     }),
     merge: (existing, fragment) => ({
       ...existing,
@@ -142,11 +185,14 @@ const TOOLS = [
   },
   {
     name: 'VS Code (Copilot)',
+    format: 'json',
     configPaths: [
       join(process.cwd(), '.vscode', 'mcp.json'),
     ],
-    shape: (token, orKey) => ({
-      servers: { megalens: mcpEntry(token, orKey) },
+    shape: (token) => ({
+      servers: {
+        megalens: { type: 'http', url: mcpUrlFor('copilot'), headers: { Authorization: `Bearer ${token}` } },
+      },
     }),
     merge: (existing, fragment) => ({
       ...existing,
@@ -155,11 +201,14 @@ const TOOLS = [
   },
   {
     name: 'Windsurf',
+    format: 'json',
     configPaths: [
       join(homedir(), '.codeium', 'windsurf', 'mcp_config.json'),
     ],
-    shape: (token, orKey) => ({
-      mcpServers: { megalens: mcpEntry(token, orKey) },
+    shape: (token) => ({
+      mcpServers: {
+        megalens: { serverUrl: mcpUrlFor('windsurf'), headers: { Authorization: `Bearer ${token}` } },
+      },
     }),
     merge: (existing, fragment) => ({
       ...existing,
@@ -192,15 +241,45 @@ async function validateToken(token) {
     if (data.valid) {
       console.log('\n  Token is valid.')
       console.log(`  Plan: ${data.plan_code}`)
-      console.log(`  Pro:  ${data.is_pro ? 'Yes' : 'No'}\n`)
-      return { valid: true, isPro: !!data.is_pro }
+      if (data.is_payg) console.log('  Billing: Pay-as-you-go (managed keys)\n')
+      else if (data.is_pro) console.log('  Billing: Pro\n')
+      else console.log('  Billing: Free\n')
+      return { valid: true, isPro: !!data.is_pro, isPayg: !!data.is_payg }
     } else {
       console.error(`\n  Token invalid: ${data.error}\n`)
-      return { valid: false, isPro: false }
+      return { valid: false, isPro: false, isPayg: false }
     }
   } catch (err) {
     console.error(`\n  Connection failed: ${err.message}\n`)
-    return { valid: false, isPro: false }
+    return { valid: false, isPro: false, isPayg: false }
+  }
+}
+
+async function writeToolConfig(tool, path, token) {
+  if (tool.format === 'toml') {
+    const existing = await readFile(path, 'utf-8').catch(() => '')
+    if (existing.includes('[mcp_servers.megalens]')) {
+      console.log('  MegaLens already in config — skipping.')
+      return
+    }
+    await writeFile(path, existing + tool.toml(token), 'utf-8')
+    await chmod(path, 0o600)
+  } else {
+    const read = await readJson(path)
+    if (read.unreadable) {
+      /**
+       * Never overwrite a file we could not read. It has the customer's other servers in it.
+       */
+      console.log(`\n  ! ${path} exists but could not be parsed as JSON:`)
+      console.log(`    ${read.unreadable}`)
+      console.log('    Not touching it — your existing config is intact.')
+      console.log('    Add this block yourself, or fix the file and run setup again:\n')
+      console.log(`${JSON.stringify(tool.shape(token), null, 2)}\n`)
+      return
+    }
+    const fragment = tool.shape(token)
+    const merged = tool.merge(read.data ?? {}, fragment)
+    await writeJson(path, merged)
   }
 }
 
@@ -222,26 +301,12 @@ async function cmdSetup() {
     if (cont.toLowerCase() !== 'y') process.exit(1)
   }
 
-  // 3. BYOK — only ask free-tier users for OpenRouter key
-  let openrouterKey = null
-  if (!result.isPro) {
-    console.log('  Free plan detected. You need an OpenRouter API key to use MegaLens.')
-    console.log('  Get one at https://openrouter.ai/keys\n')
-    openrouterKey = await ask('  Enter your OpenRouter key (sk-or-v1-...): ', { hidden: true })
-    if (!openrouterKey.startsWith('sk-or-')) {
-      console.log('  Doesn\'t look like an OpenRouter key. You can add it later in your config file.')
-      openrouterKey = null
-    }
-  } else {
-    console.log('  Pro plan — no API keys needed. MegaLens handles routing.\n')
-  }
-
-  // 4. Detect tools
+  // 3. Detect tools
   const tools = await detectTools()
 
   if (tools.length === 0) {
     console.log('  No supported tools detected.')
-    console.log('  Supported: Claude Code, Codex CLI, Cursor, Gemini CLI, VS Code, Windsurf')
+    console.log('  Supported: Claude Code, Codex CLI, Grok Build, Cursor, Gemini CLI, VS Code, Windsurf')
     console.log('  Manual setup: https://megalens.ai/integrations\n')
 
     const choices = TOOLS.map((t, i) => `    ${i + 1}. ${t.name}`).join('\n')
@@ -253,25 +318,20 @@ async function cmdSetup() {
       const path = tool.configPaths[0]
       const dir = path.substring(0, path.lastIndexOf('/'))
       await mkdir(dir, { recursive: true }).catch(() => {})
-      const fragment = tool.shape(token, openrouterKey)
-      await writeJson(path, fragment)
+      await writeToolConfig(tool, path, token)
       console.log(`\n  Created ${path}`)
       console.log(`  Restart ${tool.name} to activate MegaLens.\n`)
     }
     return
   }
 
-  // 5. Write config for each detected tool
+  // 4. Write config for each detected tool
   for (const tool of tools) {
     console.log(`\n  Found: ${tool.name} (${tool.activePath})`)
     const proceed = await ask(`  Add MegaLens to ${tool.name}? (Y/n): `)
     if (proceed.toLowerCase() === 'n') continue
 
-    const existing = (await readJson(tool.activePath)) || {}
-    const fragment = tool.shape(token, openrouterKey)
-    const merged = tool.merge(existing, fragment)
-
-    await writeJson(tool.activePath, merged)
+    await writeToolConfig(tool, tool.activePath, token)
     console.log(`  Updated ${tool.activePath}`)
   }
 
@@ -284,7 +344,7 @@ async function cmdValidate() {
   let token = null
 
   for (const tool of tools) {
-    const config = await readJson(tool.activePath)
+    const config = (await readJson(tool.activePath)).data
     const serverConfig = config?.mcpServers?.megalens || config?.mcp?.servers?.megalens
     if (serverConfig?.headers?.Authorization) {
       token = serverConfig.headers.Authorization.replace('Bearer ', '')
@@ -313,10 +373,16 @@ async function cmdConfig() {
   }
 
   for (const tool of tools) {
-    const config = await readJson(tool.activePath)
-    const serverConfig = config?.mcpServers?.megalens || config?.mcp?.servers?.megalens
-    const hasToken = !!serverConfig?.headers?.Authorization
-    const status = hasToken ? 'configured' : 'no token'
+    let status = 'no token'
+    if (tool.format === 'toml') {
+      const raw = await readFile(tool.activePath, 'utf-8').catch(() => '')
+      status = raw.includes('[mcp_servers.megalens]') ? 'configured' : 'no token'
+    } else {
+      const config = (await readJson(tool.activePath)).data
+      const serverConfig = config?.mcpServers?.megalens || config?.servers?.megalens
+      const hasToken = !!serverConfig?.headers?.Authorization
+      status = hasToken ? 'configured' : 'no token'
+    }
     console.log(`  ${tool.name}: ${tool.activePath} [${status}]`)
   }
   console.log()

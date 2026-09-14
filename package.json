@@ -1,6 +1,6 @@
 {
   "name": "megalens-mcp",
-  "version": "0.1.0",
+  "version": "0.3.1",
   "description": "MegaLens MCP server — multi-engine code analysis inside your IDE",
   "license": "MIT",
   "author": "MegaLens.ai <hello@megalens.ai>",
@@ -18,6 +18,7 @@
     "codex",
     "cursor",
     "gemini-cli",
+    "grok",
     "copilot",
     "vscode",
     "windsurf"
