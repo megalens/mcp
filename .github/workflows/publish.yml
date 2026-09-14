@@ -64,6 +64,21 @@ jobs:
           fi
           echo "publishing $PKG"
 
+      # Says which side is at fault when a publish fails with ENEEDAUTH. If the
+      # request URL is missing, GitHub never minted an identity token and the
+      # problem is here. If it is present and npm still refuses, the problem is
+      # the trusted publisher entry on npmjs.com -- npm reports that as a plain
+      # "need auth", which reads like a missing token rather than a rejected
+      # identity.
+      - name: OIDC available?
+        run: |
+          if [ -n "$ACTIONS_ID_TOKEN_REQUEST_URL" ]; then
+            echo "OIDC token endpoint present — GitHub side is fine"
+          else
+            echo "no OIDC token endpoint — check permissions: id-token: write" >&2
+            exit 1
+          fi
+
       # No NODE_AUTH_TOKEN. The npm CLI detects the OIDC environment and uses it.
       - name: Publish
         run: npm publish
