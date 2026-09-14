@@ -33,10 +33,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Deliberately no `registry-url:`. Setting it makes setup-node write an
+      # .npmrc containing `_authToken=${NODE_AUTH_TOKEN}` and point
+      # NPM_CONFIG_USERCONFIG at it. That file wins over OIDC detection, so npm
+      # authenticates with an unset placeholder token and the registry answers
+      # `404 Not Found - PUT .../megalens-mcp` — which reads like the package
+      # does not exist rather than like an auth failure. First run failed here.
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-          registry-url: 'https://registry.npmjs.org'
 
       # Trusted publishing needs npm >= 11.5.1. The Node 22 images ship npm 10.x,
       # which would authenticate the old way and fail.
