@@ -1,6 +1,6 @@
 {
   "name": "megalens-mcp",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "MegaLens MCP server — multi-engine code analysis inside your IDE",
   "license": "MIT",
   "author": "MegaLens.ai <hello@megalens.ai>",

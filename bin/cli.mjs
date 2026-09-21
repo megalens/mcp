@@ -9,7 +9,7 @@
  *   megalens-mcp config          Show current config location + status
  */
 
-import { readFile, writeFile, access, mkdir, chmod } from 'fs/promises'
+import { readFile, writeFile, access, mkdir, chmod, rename, unlink, realpath, stat, chown } from 'fs/promises'
 import { join } from 'path'
 import { homedir } from 'os'
 import { createInterface } from 'readline'
@@ -89,7 +89,17 @@ async function readJson(path) {
   let raw
   try {
     raw = await readFile(path, 'utf-8')
-  } catch {
+  } catch (err) {
+    // Only "there is no file" may be treated as a blank slate. Every other read
+    // error — EACCES, EISDIR, EIO — means a file exists whose contents we cannot
+    // see, and treating that as empty means writing a config holding nothing but
+    // MegaLens over the top of it. The direct write used to fail with EACCES and
+    // stop; replacing via rename only needs the *directory* to be writable, so
+    // the old accident is no longer self-limiting. Reproduced on a mode-000
+    // config: unrelated settings lost, and setup reported success.
+    if (err?.code !== 'ENOENT') {
+      return { missing: false, data: null, unreadable: String(err?.message ?? err) }
+    }
     return { missing: true, data: null }
   }
   if (raw.trim() === '') return { missing: true, data: null }
@@ -100,10 +110,83 @@ async function readJson(path) {
   }
 }
 
+/**
+ * Replace a config file in one step.
+ *
+ * `writeFile` truncates the destination and then writes, so a process killed in
+ * between leaves the user with an empty or half-written config — every MCP
+ * server and setting in it, not only ours. Writing a sibling temp file and
+ * renaming it makes the swap atomic: a reader sees either the whole old file or
+ * the whole new one. The temp file sits beside the target because rename is
+ * only atomic within a filesystem, and it carries the 0600 mode *before* the
+ * rename so the token is never readable at the final path even briefly.
+ *
+ * Two things this has to get right, both found in review:
+ *
+ * `rename` does not follow a symlink at the destination — it replaces the link
+ * with a regular file. This audience keeps dotfiles in a git repo and symlinks
+ * `~/.codex/config.toml` into it, and severing that link loses the MegaLens
+ * entry days later, when the next `stow`/`chezmoi apply` re-links over it, with
+ * nothing pointing back here. Resolving the path first keeps the indirection
+ * the old `writeFile` had, and keeps the temp file on the target's filesystem.
+ * Note what that means: on such a setup the token is written into the dotfiles
+ * repo, exactly as it was before — the user's own arrangement, but worth
+ * knowing before it reaches a remote.
+ *
+ * The temp name must be unique per run. A fixed one let two concurrent setups
+ * interleave — A finishes its temp, B reopens the same name with O_TRUNC, A
+ * renames and publishes B's half-written file — reintroducing at the final path
+ * the very corruption this exists to prevent. With unique names the race
+ * collapses to last-rename-wins, and every rename publishes a whole file.
+ *
+ * The temp is created exclusively (`wx`). `writeFile`'s `mode` applies only when
+ * it creates the file, so reusing an existing name would write the token into
+ * whatever mode that file already had — 0644 is readable by another user before
+ * the chmod lands — and if the name were a symlink, `writeFile` would follow it
+ * and we would publish that symlink as the config. `wx` refuses both.
+ *
+ * Ownership is carried over, because `rename` installs the temp's inode: a run
+ * under sudo would otherwise leave a root-owned 0600 config that its actual
+ * owner can no longer read.
+ *
+ * A SIGKILL between the write and the rename does leave one temp file behind,
+ * 0600 and unread by anything. Sweeping siblings on entry would risk deleting a
+ * concurrent run's in-flight temp — the bug above wearing a different hat — so
+ * it is left alone deliberately.
+ */
+async function writeFileAtomic(path, contents) {
+  const target = await realpath(path).catch(() => path)
+  const tmp = `${target}.megalens-tmp.${process.pid}.${process.hrtime.bigint().toString(36)}`
+  const existing = await stat(target).catch(() => null)
+
+  if (existing && existing.nlink > 1) {
+    // rename swaps this directory entry only; the file's other names keep the
+    // old inode and silently stop tracking it.
+    console.log(`\n  ! ${target} has other hard links. They will keep the previous contents.`)
+  }
+
+  try {
+    await writeFile(tmp, contents, { encoding: 'utf-8', mode: 0o600, flag: 'wx' })
+    await chmod(tmp, 0o600)
+    if (existing && typeof process.getuid === 'function') {
+      if (existing.uid !== process.getuid() || existing.gid !== process.getgid()) {
+        try {
+          await chown(tmp, existing.uid, existing.gid)
+        } catch {
+          console.log(`\n  ! Could not preserve ownership of ${target}; it will belong to the current user.`)
+        }
+      }
+    }
+    await rename(tmp, target)
+  } catch (err) {
+    await unlink(tmp).catch(() => {})
+    throw err
+  }
+}
+
 async function writeJson(path, data) {
-  await writeFile(path, JSON.stringify(data, null, 2) + '\n', 'utf-8')
-  // Restrict permissions: token is sensitive (Gemini security fix)
-  await chmod(path, 0o600)
+  // Token is sensitive, so the file is 0600 from the moment it exists.
+  await writeFileAtomic(path, JSON.stringify(data, null, 2) + '\n')
 }
 
 // ── Tool detection ──
@@ -378,17 +461,25 @@ function stripTomlTable(text, table) {
  */
 async function writeToolConfig(tool, path, token) {
   if (tool.format === 'toml') {
-    const existing = await readFile(path, 'utf-8').catch(() => '')
-    const without = stripTomlTable(existing, 'mcp_servers.megalens')
+    // Same rule as readJson: only ENOENT is a blank slate. Swallowing EACCES
+    // here would hand stripTomlTable an empty string and replace a config we
+    // were never able to see with one holding nothing but MegaLens.
+    let existing = ''
+    let unreadable = null
+    try {
+      existing = await readFile(path, 'utf-8')
+    } catch (err) {
+      if (err?.code !== 'ENOENT') unreadable = String(err?.message ?? err)
+    }
+    const without = unreadable === null ? stripTomlTable(existing, 'mcp_servers.megalens') : null
     if (without === null) {
-      console.log(`\n  ! ${path} could not be read as TOML — a string or bracket is left open.`)
+      console.log(`\n  ! ${path} could not be read${unreadable ? `: ${unreadable}` : ' as TOML — a string or bracket is left open.'}`)
       console.log('    Not touching it — your existing config is intact.')
       console.log('    Add this block yourself, or fix the file and run setup again:\n')
       console.log(`${tool.toml(token).trim()}\n`)
       return 'skipped'
     }
-    await writeFile(path, without.replace(/\s+$/, '') + '\n' + tool.toml(token), 'utf-8')
-    await chmod(path, 0o600)
+    await writeFileAtomic(path, without.replace(/\s+$/, '') + '\n' + tool.toml(token))
     return 'written'
   } else {
     const read = await readJson(path)
