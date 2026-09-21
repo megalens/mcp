@@ -255,15 +255,141 @@ async function validateToken(token) {
   }
 }
 
+/**
+ * Advance a minimal TOML scanner across one line.
+ *
+ * We only need enough of the grammar to know when a line is *not* code: inside
+ * a multi-line string, or inside a value that spans lines. Returns the state
+ * the next line starts in.
+ */
+function scanTomlLine(line, delim, depth) {
+  let i = 0
+  while (i < line.length) {
+    if (delim) {
+      if (line.startsWith(delim, i)) { delim = null; i += 3 } else i++
+      continue
+    }
+    const three = line.slice(i, i + 3)
+    if (three === '"""' || three === "'''") { delim = three; i += 3; continue }
+    const c = line[i]
+    if (c === '#') break // comment runs to end of line
+    if (c === '"' || c === "'") {
+      i++
+      while (i < line.length) {
+        if (c === '"' && line[i] === '\\') { i += 2; continue }
+        if (line[i] === c) { i++; break }
+        i++
+      }
+      continue
+    }
+    if (c === '[' || c === '{') depth++
+    else if (c === ']' || c === '}') depth = Math.max(0, depth - 1)
+    i++
+  }
+  return { delim, depth }
+}
+
+/**
+ * Parse a line as a TOML table header, returning its normalised dotted key.
+ *
+ * `[mcp_servers.megalens]`, `[ mcp_servers.megalens ]`,
+ * `[mcp_servers."megalens"]` and `[mcp_servers.megalens] # note` are all the
+ * same table, and an exact string comparison recognises only the first. That
+ * mattered: a trailing comment made the old check miss the existing table, so
+ * setup appended a second one and produced TOML that Codex refuses to load
+ * ("cannot declare ... twice") while reporting success. Returns null when the
+ * line is not a header.
+ */
+function tomlHeaderPath(line) {
+  const t = line.trim()
+  if (!t.startsWith('[')) return null
+  const isArray = t.startsWith('[[')
+  const open = isArray ? 2 : 1
+  const close = isArray ? ']]' : ']'
+  const end = t.indexOf(close, open)
+  if (end === -1) return null
+  const after = t.slice(end + close.length).trim()
+  if (after && !after.startsWith('#')) return null
+  const parts = []
+  let cur = ''
+  let quote = null
+  for (const ch of t.slice(open, end)) {
+    if (quote) {
+      if (ch === quote) quote = null
+      else cur += ch
+    } else if (ch === '"' || ch === "'") {
+      quote = ch
+    } else if (ch === '.') {
+      parts.push(cur.trim())
+      cur = ''
+    } else {
+      cur += ch
+    }
+  }
+  parts.push(cur.trim())
+  return parts.some((p) => p === '') ? null : parts.join('.')
+}
+
+/**
+ * Remove one TOML table, and any sub-tables under it, leaving the rest of the
+ * file untouched. Returns null when the file cannot be scanned confidently, so
+ * the caller can leave it alone rather than guess.
+ *
+ * The first version of this tested `line.trim().startsWith('[')` and two
+ * reviewers independently broke it with valid TOML: a bracketed line inside a
+ * multi-line array value, and a line reading `[mcp_servers.megalens]` inside a
+ * multi-line `"""` string. Each made the installer delete or orphan part of the
+ * user's file — every MCP server and setting in it, not just ours — and then
+ * print "Updated". Only genuine headers, found outside strings and values, may
+ * start or end a table.
+ */
+function stripTomlTable(text, table) {
+  const out = []
+  let dropping = false
+  let delim = null
+  let depth = 0
+
+  for (const line of text.split('\n')) {
+    if (!delim && depth === 0) {
+      const path = tomlHeaderPath(line)
+      if (path !== null) dropping = path === table || path.startsWith(`${table}.`)
+    }
+    if (!dropping) out.push(line)
+    ;({ delim, depth } = scanTomlLine(line, delim, depth))
+  }
+
+  // An unterminated string or bracket means our reading of the file diverged
+  // from the file itself. Anything we write from here is a guess.
+  if (delim || depth !== 0) return null
+  return out.join('\n')
+}
+
+/**
+ * Returns 'written' when the config now holds `token`, 'skipped' when we
+ * deliberately left the file alone.
+ *
+ * The TOML branch used to bail out whenever a megalens block already existed,
+ * while the caller printed "Updated <path>" regardless. So re-running setup
+ * with a *new* token left Codex CLI and Grok Build on the old one and reported
+ * success. Since generating a token revokes the previous one, the usual way to
+ * hit this — rotate the token, run setup again — left those two tools holding a
+ * revoked token, with nothing on screen to suggest the file had not changed.
+ * Replace the block instead; JSON tools already overwrote via `merge`.
+ */
 async function writeToolConfig(tool, path, token) {
   if (tool.format === 'toml') {
     const existing = await readFile(path, 'utf-8').catch(() => '')
-    if (existing.includes('[mcp_servers.megalens]')) {
-      console.log('  MegaLens already in config — skipping.')
-      return
+    const without = stripTomlTable(existing, 'mcp_servers.megalens')
+    if (without === null) {
+      console.log(`\n  ! ${path} could not be read as TOML — a string or bracket is left open.`)
+      console.log('    Not touching it — your existing config is intact.')
+      console.log('    Add this block yourself, or fix the file and run setup again:\n')
+      console.log(`${tool.toml(token).trim()}\n`)
+      return 'skipped'
     }
-    await writeFile(path, existing + tool.toml(token), 'utf-8')
+    await writeFile(path, without.replace(/\s+$/, '') + '\n' + tool.toml(token), 'utf-8')
     await chmod(path, 0o600)
+    return 'written'
   } else {
     const read = await readJson(path)
     if (read.unreadable) {
@@ -275,11 +401,12 @@ async function writeToolConfig(tool, path, token) {
       console.log('    Not touching it — your existing config is intact.')
       console.log('    Add this block yourself, or fix the file and run setup again:\n')
       console.log(`${JSON.stringify(tool.shape(token), null, 2)}\n`)
-      return
+      return 'skipped'
     }
     const fragment = tool.shape(token)
     const merged = tool.merge(read.data ?? {}, fragment)
     await writeJson(path, merged)
+    return 'written'
   }
 }
 
@@ -326,16 +453,38 @@ async function cmdSetup() {
   }
 
   // 4. Write config for each detected tool
+  const configured = []
+  let accepted = 0
   for (const tool of tools) {
     console.log(`\n  Found: ${tool.name} (${tool.activePath})`)
     const proceed = await ask(`  Add MegaLens to ${tool.name}? (Y/n): `)
     if (proceed.toLowerCase() === 'n') continue
+    accepted++
 
-    await writeToolConfig(tool, tool.activePath, token)
+    // Only claim it, and only count it as configured, when the file really changed.
+    if (await writeToolConfig(tool, tool.activePath, token) !== 'written') continue
     console.log(`  Updated ${tool.activePath}`)
+    configured.push(tool.name)
   }
 
-  console.log('\n  Setup complete. Restart your tool to activate MegaLens.\n')
+  if (configured.length === 0) {
+    // "You declined every tool" is false when a file was accepted but refused
+    // above; say which of the two actually happened.
+    console.log(accepted === 0
+      ? '\n  Nothing was configured — you declined every tool.\n'
+      : '\n  Nothing was written — see the warning above.\n')
+    return
+  }
+
+  /**
+   * Name the tools the user actually said yes to, and be explicit that an
+   * already-running session will not see MegaLens. These configs are read once
+   * at startup, so the session this ran in is exactly the one where it will
+   * appear to have done nothing.
+   */
+  console.log(`\n  Setup complete. MegaLens was added to: ${configured.join(', ')}`)
+  console.log('\n  It will NOT appear in a session that is already open.')
+  console.log(`  Close ${configured.length > 1 ? 'those tools' : configured[0]} and start a new session.\n`)
 }
 
 async function cmdValidate() {
