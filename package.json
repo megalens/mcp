@@ -1,7 +1,7 @@
 {
   "name": "megalens-mcp",
-  "version": "0.3.4",
-  "description": "MegaLens MCP server — multi-engine code analysis inside your IDE",
+  "version": "0.3.5",
+  "description": "MegaLens MCP server \u2014 multi-engine code analysis inside your IDE",
   "license": "MIT",
   "author": "MegaLens.ai <hello@megalens.ai>",
   "homepage": "https://megalens.ai/extensions/mcp",
@@ -18,10 +18,8 @@
     "codex",
     "cursor",
     "gemini-cli",
-    "grok",
-    "copilot",
-    "vscode",
-    "windsurf"
+    "lovable",
+    "ai-code-review"
   ],
   "bin": {
     "megalens-mcp": "./bin/cli.mjs"
@@ -29,7 +27,8 @@
   "type": "module",
   "files": [
     "bin/",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "engines": {
     "node": ">=18"

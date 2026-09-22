@@ -1,6 +1,9 @@
 # megalens-mcp
 
-Multi-engine code review inside your IDE. MegaLens reviews your code through specialist debate engines and delivers a judge-verified verdict — all from your existing AI tool.
+Code review from a panel of AI models, inside the AI tool you already use. MegaLens sends your code
+to models from different companies, usually two, and reports where they agree and where they disagree.
+
+Your first review is free, with no card.
 
 ## Quick Start
 
@@ -22,21 +25,21 @@ The setup wizard:
 | Codex CLI | `~/.codex/config.toml` | Yes |
 | Cursor | `~/.cursor/mcp.json` | Yes |
 | Gemini CLI | `~/.gemini/settings.json` | Yes |
-| VS Code (Copilot) | `.vscode/mcp.json` | Yes |
-| Windsurf | `~/.codeium/windsurf/mcp_config.json` | Yes |
+| VS Code (Copilot) | `.vscode/mcp.json` | Yes. **Coming soon:** the wizard can write the config, but this integration is not supported yet |
+| Windsurf | `~/.codeium/windsurf/mcp_config.json` | Yes. Not yet verified end to end |
 
 If no tool is detected, the wizard lets you pick one and creates the config file.
 
+**Lovable** needs no config file and no wizard. Paste the server URL and your token into Lovable's
+MCP connector form. Steps: [megalens.ai/integrations/lovable](https://megalens.ai/integrations/lovable)
+
 ## Manual Setup
 
-Every example below was checked against each vendor's own documentation, not copied from
-elsewhere. The differences between them are real — two config languages and three top-level keys —
-which is why the wizard exists.
+The tools use two config languages and three different top-level keys, which is why the wizard
+exists.
 
-**Note the `?ide=` on each URL.** MegaLens picks engines by skipping your own tool's model — in
-Claude Code it brings GPT, Gemini and DeepSeek instead of Claude — and it can only do that if it
-knows which tool is calling. Measured across 94 real runs before this was added: **75 arrived
-unidentified**, so the feature could not work for them.
+**Keep the `?ide=` on each URL.** It tells MegaLens which tool the review came from. It does not
+change which models review your code: the panel is the same whichever tool you call it from.
 
 ### Claude Code
 
@@ -78,7 +81,7 @@ Or in `.mcp.json` (project) / `~/.claude.json` (user):
 }
 ```
 
-### VS Code / Copilot
+### VS Code / Copilot (coming soon, not yet supported)
 
 `.vscode/mcp.json`. **The top-level key is `servers`, not `mcpServers`** — a config written for
 Claude Code or Cursor will not be read here:
@@ -122,18 +125,20 @@ Add one more header alongside `Authorization`, in whichever shape your tool uses
 
 ## How It Works
 
-MegaLens detects which AI tool is calling it and adjusts the engine lineup:
+MegaLens sends your code to a panel of AI models from different companies, usually two. They review
+it separately. Their findings are then compared and reviewed once more, and you get back where they
+agreed and where they disagreed.
 
-- **Claude Code?** MegaLens skips Claude, brings in GPT, Gemini, and DeepSeek
-- **Codex CLI?** MegaLens skips GPT, brings in Claude, Gemini, and DeepSeek
-- **Cursor?** MegaLens skips your active Cursor model, reviews with independent engines
+If you send your own assessment with the request, the answer also says what the panel found that
+yours did not.
 
-3 genuinely different viewpoints. No duplicate API calls.
+The panel is the same whichever tool you call it from. MegaLens reports; it does not change your
+code. Your own tool stays the one that decides what to do next.
 
 ## Requirements
 
 - Node.js 18+
-- MegaLens account — [megalens.ai](https://megalens.ai)
+- A MegaLens account: [megalens.ai](https://megalens.ai). Your first review is free, with no card
 
 ## Links
 
