@@ -1,7 +1,7 @@
 {
   "name": "megalens-mcp",
-  "version": "0.3.5",
-  "description": "MegaLens MCP server \u2014 multi-engine code analysis inside your IDE",
+  "version": "0.3.6",
+  "description": "MegaLens setup wizard: connects your IDE to the hosted MegaLens MCP server.",
   "license": "MIT",
   "author": "MegaLens.ai <hello@megalens.ai>",
   "homepage": "https://megalens.ai/extensions/mcp",

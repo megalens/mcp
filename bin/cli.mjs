@@ -22,10 +22,9 @@ const MCP_URL = `${API_BASE}/api/mcp`
  *
  * The server has a whole attribution chain for this -- an `x-megalens-caller`
  * header, then `?ide=`, then User-Agent sniffing -- and this client was handing
- * every tool the same bare URL. Measured on 94 real runs: **75 arrived as
- * `unknown`**, which breaks the feature this README leads with. MegaLens picks
- * engines by skipping the caller's own model ("Claude Code? MegaLens skips
- * Claude"), and it cannot skip a host it was never told about.
+ * every tool the same bare URL, so most runs arrived as `unknown`. The tag is
+ * attribution only: it tells MegaLens which tool sent the review. It does not
+ * change which models review the code.
  *
  * `?ide=` rather than a header because it survives every config format here,
  * including Codex's TOML and VS Code's, where header support is not documented.
@@ -227,6 +226,7 @@ const TOOLS = [
      *   grok mcp add --transport http megalens <url> --header "Authorization: Bearer <token>"
      */
     name: 'Grok Build',
+    label: 'Grok Build (not supported or tested)',
     format: 'toml',
     configPaths: [
       join(homedir(), '.grok', 'config.toml'),
@@ -268,6 +268,7 @@ const TOOLS = [
   },
   {
     name: 'VS Code (Copilot)',
+    label: 'GitHub Copilot in VS Code (coming soon, not supported yet)',
     format: 'json',
     configPaths: [
       join(process.cwd(), '.vscode', 'mcp.json'),
@@ -284,6 +285,7 @@ const TOOLS = [
   },
   {
     name: 'Windsurf',
+    label: 'Windsurf (not supported or tested)',
     format: 'json',
     configPaths: [
       join(homedir(), '.codeium', 'windsurf', 'mcp_config.json'),
@@ -524,10 +526,12 @@ async function cmdSetup() {
 
   if (tools.length === 0) {
     console.log('  No supported tools detected.')
-    console.log('  Supported: Claude Code, Codex CLI, Grok Build, Cursor, Gemini CLI, VS Code, Windsurf')
+    console.log('  Supported: Claude Code, Codex CLI, Cursor, Gemini CLI and Lovable. GitHub Copilot is coming soon.')
+    console.log('  Lovable needs no config file: paste the server URL and your token into its MCP connector form.')
+    console.log('  Lovable steps: https://megalens.ai/integrations/lovable')
     console.log('  Manual setup: https://megalens.ai/integrations\n')
 
-    const choices = TOOLS.map((t, i) => `    ${i + 1}. ${t.name}`).join('\n')
+    const choices = TOOLS.map((t, i) => `    ${i + 1}. ${t.label ?? t.name}`).join('\n')
     console.log('  Which tool do you want to configure?\n' + choices)
     const pick = await ask('\n  Enter number (or press Enter to skip): ')
     const idx = parseInt(pick, 10) - 1
@@ -547,7 +551,7 @@ async function cmdSetup() {
   const configured = []
   let accepted = 0
   for (const tool of tools) {
-    console.log(`\n  Found: ${tool.name} (${tool.activePath})`)
+    console.log(`\n  Found: ${tool.label ?? tool.name} (${tool.activePath})`)
     const proceed = await ask(`  Add MegaLens to ${tool.name}? (Y/n): `)
     if (proceed.toLowerCase() === 'n') continue
     accepted++

@@ -1,7 +1,10 @@
 # megalens-mcp
 
-Code review from a panel of AI models, inside the AI tool you already use. MegaLens sends your code
-to models from different companies, usually two, and reports where they agree and where they disagree.
+Code review from a panel of AI models, inside the AI tool you already use. MegaLens selects up to four
+AI models from different companies to review your code, and reports where they agree and where they
+disagree. On Free, MegaLens selects two reviewing models.
+
+Works with Claude Code, Codex CLI, Cursor, Gemini CLI and Lovable. GitHub Copilot is coming soon.
 
 Your first review is free, with no card.
 
@@ -13,22 +16,25 @@ npx megalens-mcp setup
 
 The setup wizard:
 1. Asks for your MegaLens token ([get one here](https://megalens.ai/app/settings/mcp))
-2. Optionally asks for your OpenRouter API key (free-tier BYOK users)
-3. Detects installed tools automatically
-4. Writes the correct config for each tool
+2. Detects installed tools automatically
+3. Writes the correct config for each tool
+
+The wizard does not ask for an OpenRouter key. To use your own key, add one header by hand: see
+[Adding your own OpenRouter key](#adding-your-own-openrouter-key-free--byok).
 
 ## Supported Tools
 
-| Tool | Config File | Auto-detected |
-|------|-------------|---------------|
-| Claude Code | `~/.claude.json` | Yes |
-| Codex CLI | `~/.codex/config.toml` | Yes |
-| Cursor | `~/.cursor/mcp.json` | Yes |
-| Gemini CLI | `~/.gemini/settings.json` | Yes |
-| VS Code (Copilot) | `.vscode/mcp.json` | Yes. **Coming soon:** the wizard can write the config, but this integration is not supported yet |
-| Windsurf | `~/.codeium/windsurf/mcp_config.json` | Yes. Not yet verified end to end |
+| Tool | Status | Config File | Auto-detected |
+|------|--------|-------------|---------------|
+| Claude Code | Supported | `~/.claude.json` | Yes |
+| Codex CLI | Supported | `~/.codex/config.toml` | Yes |
+| Cursor | Supported | `~/.cursor/mcp.json` | Yes |
+| Gemini CLI | Supported | `~/.gemini/settings.json` | Yes |
+| Lovable | Supported | None (a form in Lovable) | No, see below |
+| GitHub Copilot (VS Code) | **Coming soon**, not supported yet | `.vscode/mcp.json` | Only if that file already exists in the folder you run the wizard from |
 
-If no tool is detected, the wizard lets you pick one and creates the config file.
+If no tool is detected, the wizard lets you pick one and creates the config file. The wizard can also
+write configs for Windsurf and Grok Build. Those are not supported or tested.
 
 **Lovable** needs no config file and no wizard. Paste the server URL and your token into Lovable's
 MCP connector form. Steps: [megalens.ai/integrations/lovable](https://megalens.ai/integrations/lovable)
@@ -43,8 +49,10 @@ change which models review your code: the panel is the same whichever tool you c
 
 ### Claude Code
 
+Run this once. The `--scope user` flag makes MegaLens available in every project:
+
 ```bash
-claude mcp add --transport http megalens "https://megalens.ai/api/mcp?ide=claude-code" \
+claude mcp add --transport http --scope user megalens "https://megalens.ai/api/mcp?ide=claude-code" \
   --header "Authorization: Bearer ml_tok_your_token_here"
 ```
 
@@ -66,7 +74,7 @@ Or in `.mcp.json` (project) / `~/.claude.json` (user):
 
 ### Cursor
 
-`~/.cursor/mcp.json` or `.cursor/mcp.json`. **No `type` field** — Cursor does not use one:
+`~/.cursor/mcp.json` or `.cursor/mcp.json`. **No `type` field.** Cursor does not use one:
 
 ```json
 {
@@ -81,17 +89,37 @@ Or in `.mcp.json` (project) / `~/.claude.json` (user):
 }
 ```
 
-### VS Code / Copilot (coming soon, not yet supported)
+### Gemini CLI
 
-`.vscode/mcp.json`. **The top-level key is `servers`, not `mcpServers`** — a config written for
-Claude Code or Cursor will not be read here:
+`~/.gemini/settings.json`. Gemini CLI uses `httpUrl`, not `url`:
+
+```json
+{
+  "mcpServers": {
+    "megalens": {
+      "httpUrl": "https://megalens.ai/api/mcp?ide=gemini-cli",
+      "headers": {
+        "Authorization": "Bearer ml_tok_your_token_here"
+      }
+    }
+  }
+}
+```
+
+### GitHub Copilot in VS Code (coming soon, not supported yet)
+
+GitHub Copilot is coming soon. If you want to try it early: `.vscode/mcp.json`. **The top-level key
+is `servers`, not `mcpServers`.** A config written for Claude Code or Cursor will not be read here:
 
 ```json
 {
   "servers": {
     "megalens": {
       "type": "http",
-      "url": "https://megalens.ai/api/mcp?ide=copilot"
+      "url": "https://megalens.ai/api/mcp?ide=copilot",
+      "headers": {
+        "Authorization": "Bearer ml_tok_your_token_here"
+      }
     }
   }
 }
@@ -109,25 +137,36 @@ http_headers = { "Authorization" = "Bearer ml_tok_your_token_here" }
 
 ### Adding your own OpenRouter key (free / BYOK)
 
-Add one more header alongside `Authorization`, in whichever shape your tool uses above:
+Add one more header alongside `Authorization`, in whichever shape your tool uses above. The key
+needs credit on it. You pay OpenRouter directly; MegaLens is not part of that bill.
 
 ```
 "x-megalens-openrouter-key": "sk-or-v1-your-openrouter-key"
 ```
 
+In Codex TOML:
+
+```toml
+http_headers = { "Authorization" = "Bearer ml_tok_your_token_here", "x-megalens-openrouter-key" = "sk-or-v1-your-openrouter-key" }
+```
+
+With Claude Code's command, add `--header "x-megalens-openrouter-key: sk-or-v1-your-openrouter-key"`.
+
+If you skip the key, use pay-as-you-go credits instead: $9 per 1M blended tokens, prepaid from $20.
+
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `megalens-mcp setup` | Interactive setup — detect tools, write config |
+| `megalens-mcp setup` | Interactive setup: detect tools, write config |
 | `megalens-mcp validate` | Test your token connectivity |
 | `megalens-mcp config` | Show current config status |
 
 ## How It Works
 
-MegaLens sends your code to a panel of AI models from different companies, usually two. They review
-it separately. Their findings are then compared and reviewed once more, and you get back where they
-agreed and where they disagreed.
+MegaLens selects up to four AI models from different companies to review your code. They review it
+separately. A final check reviews their findings, and you get back where they agreed and where they
+disagreed. Each result names the models that actually took part.
 
 If you send your own assessment with the request, the answer also says what the panel found that
 yours did not.
@@ -137,7 +176,7 @@ code. Your own tool stays the one that decides what to do next.
 
 ## Requirements
 
-- Node.js 18+
+- Node.js 18+ (only for the setup wizard; manual setup needs nothing)
 - A MegaLens account: [megalens.ai](https://megalens.ai). Your first review is free, with no card
 
 ## Links
