@@ -174,6 +174,11 @@ yours did not.
 The panel is the same whichever tool you call it from. MegaLens reports; it does not change your
 code. Your own tool stays the one that decides what to do next.
 
+> **Our private recipe.** What stays private: how we choose the models and what each one is asked to do,
+> the numbers that tune each check, and the prompts. That recipe came from months of measured runs and
+> changes as models change. Our results, rules and mistakes are public:
+> [megalens.ai/research/ai-code-review-false-positives](https://megalens.ai/research/ai-code-review-false-positives)
+
 ## Requirements
 
 - Node.js 18+ (only for the setup wizard; manual setup needs nothing)
