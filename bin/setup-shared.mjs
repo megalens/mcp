@@ -6,15 +6,53 @@ import { createInterface } from 'node:readline'
 export const MEGALENS_REVIEW_LINE =
   'After you change code that handles money, sign-in, user data or database migrations, and before the user commits it, offer a MegaLens review and wait for a yes before running it.'
 
+export const DECISION_LINE =
+  'When the user is making a decision that is hard to undo (a data model, architecture, security, a major dependency), starting a new project, or asking for deep research, offer a MegaLens review once for that task and wait for a yes before running it. Do not offer it for small questions or routine edits.'
+
+export const MEGALENS_INSTRUCTION_LINES = [MEGALENS_REVIEW_LINE, DECISION_LINE]
+
 export const TOKEN_REGEX = /^ml_tok_[0-9a-f]{32}$/i
 export const MASKED_TOKEN = 'ml_tok_****'
 
+const OLD_LINE_PATTERN = /after you change code.*offer a MegaLens review/i
+const OFFER_REVIEW_PATTERN = /offer a MegaLens review/i
+const DECISION_LINE_PATTERN = /decision that is hard to undo.*MegaLens/i
+
 const utf8FatalDecoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
+
+function normalizeLineForMatch(raw, idx) {
+  const noCr = raw.endsWith('\r') ? raw.slice(0, -1) : raw
+  const noBom = idx === 0 && noCr.startsWith('\uFEFF') ? noCr.slice(1) : noCr
+  return noBom.trim()
+}
 
 export function hasMegaLensReviewLine(text) {
   return text
-    .split(/\r?\n/)
-    .some((line) => line.trim() === MEGALENS_REVIEW_LINE || /offer a MegaLens review/i.test(line))
+    .split('\n')
+    .some((raw, idx) => {
+      const trimmed = normalizeLineForMatch(raw, idx)
+      return (
+        trimmed === MEGALENS_REVIEW_LINE ||
+        OLD_LINE_PATTERN.test(trimmed) ||
+        (OFFER_REVIEW_PATTERN.test(trimmed) && !DECISION_LINE_PATTERN.test(trimmed))
+      )
+    })
+}
+
+export function hasMegaLensDecisionLine(text) {
+  return text
+    .split('\n')
+    .some((raw, idx) => {
+      const trimmed = normalizeLineForMatch(raw, idx)
+      return trimmed === DECISION_LINE || DECISION_LINE_PATTERN.test(trimmed)
+    })
+}
+
+export function getMissingInstructionLines(text) {
+  const missing = []
+  if (!hasMegaLensReviewLine(text)) missing.push(MEGALENS_REVIEW_LINE)
+  if (!hasMegaLensDecisionLine(text)) missing.push(DECISION_LINE)
+  return missing
 }
 
 export function maskTokenSecrets(text, extraToken = '') {
@@ -325,19 +363,23 @@ export async function resolveToken({ env, prompter, errLog }) {
   return { token, exitCode: 0 }
 }
 
-export function removeExactInstructionLine(content, exactLine = MEGALENS_REVIEW_LINE) {
+export function removeExactInstructionLines(content, exactLines = MEGALENS_INSTRUCTION_LINES) {
+  const targets = Array.isArray(exactLines) ? exactLines : [exactLines]
+  const targetSet = new Set(targets)
   const lines = content.split('\n')
   const kept = []
   let removedCount = 0
   let removedBom = false
+  const removedSet = new Set()
 
   for (let i = 0; i < lines.length; i++) {
     const raw = lines[i]
     const noCr = raw.endsWith('\r') ? raw.slice(0, -1) : raw
     const hasBom = i === 0 && noCr.startsWith('\uFEFF')
     const normalized = hasBom ? noCr.slice(1) : noCr
-    if (normalized === exactLine) {
+    if (targetSet.has(normalized)) {
       removedCount++
+      removedSet.add(normalized)
       if (hasBom) removedBom = true
       continue
     }
@@ -345,20 +387,22 @@ export function removeExactInstructionLine(content, exactLine = MEGALENS_REVIEW_
   }
 
   if (removedCount === 0) {
-    return { found: false, nextContent: content, removedCount: 0 }
+    return { found: false, nextContent: content, removedCount: 0, removedLines: [] }
   }
 
   let nextContent = kept.join('\n')
   if (removedBom && nextContent.length > 0 && !nextContent.startsWith('\uFEFF')) {
     nextContent = `\uFEFF${nextContent}`
   }
-  return { found: true, nextContent, removedCount }
+  const removedLines = targets.filter((t) => removedSet.has(t))
+  return { found: true, nextContent, removedCount, removedLines }
 }
 
-export async function runAppendInstructionLine({
+export const removeExactInstructionLine = removeExactInstructionLines
+
+export async function runAppendInstructionLines({
   filePath,
   promptText,
-  line = MEGALENS_REVIEW_LINE,
   dryRun = false,
   prompter,
   platform = process.platform,
@@ -376,8 +420,12 @@ export async function runAppendInstructionLine({
     return { exitCode: 0 }
   }
 
-  if (read.exists && hasMegaLensReviewLine(read.content)) {
-    log(`  ${filePath} already has a MegaLens line. Leaving it unchanged.\n`)
+  const missingLines = read.exists
+    ? getMissingInstructionLines(read.content)
+    : [...MEGALENS_INSTRUCTION_LINES]
+
+  if (missingLines.length === 0) {
+    log(`  ${filePath} already has the MegaLens lines. Leaving it unchanged.\n`)
     return { exitCode: 0 }
   }
 
@@ -388,12 +436,17 @@ export async function runAppendInstructionLine({
     return { exitCode: 0 }
   }
 
-  log(`  Proposed ${fileLabel} line (${filePath}):`)
-  log(`    ${line}\n`)
+  const plural = missingLines.length > 1
+  log(`  Proposed ${fileLabel} ${plural ? 'lines' : 'line'} (${filePath}):`)
+  for (const line of missingLines) {
+    log(`    ${line}`)
+  }
+  log('')
 
+  const resolvedPrompt = typeof promptText === 'function' ? promptText(missingLines) : promptText
   let answer
   try {
-    answer = await prompter.askPlain(promptText)
+    answer = await prompter.askPlain(resolvedPrompt)
   } catch (err) {
     if (err?.exitCode === 130) {
       return { exitCode: 130 }
@@ -413,7 +466,7 @@ export async function runAppendInstructionLine({
   const base = !read.content
     ? ''
     : (read.content.endsWith('\n') ? read.content : `${read.content}${eol}`)
-  const nextContent = `${base}${line}${eol}`
+  const nextContent = `${base}${missingLines.join(eol)}${eol}`
 
   if (dryRun) {
     dryRunNotes.push(`${filePath} (would ${read.exists ? 'update' : 'create'})`)
@@ -440,10 +493,12 @@ export async function runAppendInstructionLine({
   }
 }
 
+export const runAppendInstructionLine = runAppendInstructionLines
+
 export async function runRemoveInstructionLine({
   filePath,
   hostName,
-  line = MEGALENS_REVIEW_LINE,
+  lines = MEGALENS_INSTRUCTION_LINES,
   dryRun = false,
   isTTY,
   prompter,
@@ -452,11 +507,15 @@ export async function runRemoveInstructionLine({
   errLog,
 }) {
   const fileLabel = basename(filePath)
+  const targetLines = Array.isArray(lines) ? lines : [lines]
 
   if (!isTTY) {
     log(`\n  MegaLens ${hostName} Setup --remove-line (non-interactive mode: nothing was written)\n`)
-    log(`  Remove this exact line from ${filePath}:\n`)
-    log(`    ${line}\n`)
+    log(`  Remove ${targetLines.length > 1 ? 'these exact lines' : 'this exact line'} from ${filePath}:\n`)
+    for (const l of targetLines) {
+      log(`    ${l}`)
+    }
+    log('')
     return { exitCode: 0, written: [], dryRun }
   }
 
@@ -477,9 +536,9 @@ export async function runRemoveInstructionLine({
     return { exitCode: 0, written: [], dryRun }
   }
 
-  const removal = removeExactInstructionLine(read.content, line)
+  const removal = removeExactInstructionLines(read.content, targetLines)
   if (!removal.found) {
-    log(`  MegaLens line not found in ${filePath}. Leaving it unchanged.\n`)
+    log(`  MegaLens lines not found in ${filePath}. Leaving it unchanged.\n`)
     return { exitCode: 0, written: [], dryRun }
   }
 
@@ -490,12 +549,16 @@ export async function runRemoveInstructionLine({
     return { exitCode: 0, written: [], dryRun }
   }
 
+  const plural = removal.removedLines.length > 1
   log(`  Will remove from ${filePath}:`)
-  log(`    - ${line}\n`)
+  for (const removedLine of removal.removedLines) {
+    log(`    - ${removedLine}`)
+  }
+  log('')
 
   let answer
   try {
-    answer = await prompter.askPlain(`  Remove MegaLens line from ${filePath}? (y/N): `)
+    answer = await prompter.askPlain(`  Remove MegaLens ${plural ? 'lines' : 'line'} from ${filePath}? (y/N): `)
   } catch (err) {
     if (err?.exitCode === 130) {
       return { exitCode: 130, written: [], dryRun }
@@ -521,7 +584,7 @@ export async function runRemoveInstructionLine({
       preserveMode: true,
       log,
     })
-    log(`  Removed MegaLens line from ${filePath}.\n`)
+    log(`  Removed MegaLens ${plural ? 'lines' : 'line'} from ${filePath}.\n`)
     return { exitCode: 0, written: [filePath], dryRun }
   } catch (err) {
     errLog(`  ! Failed to write ${filePath}: ${err?.message ?? err}`)

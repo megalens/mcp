@@ -183,18 +183,21 @@ npx megalens-mcp setup codex [--replace-token] [--remove-line] [--dry-run] [-h|-
 - Uses `$CODEX_HOME` if set, otherwise `~/.codex`.
 - Reads `MEGALENS_TOKEN` from the environment or prompts for your token without echoing it.
 - `--replace-token`: updates `http_headers` in an existing `[mcp_servers.megalens]` table.
-- `--remove-line`: removes the MegaLens review line from `$CODEX_HOME/AGENTS.md` after confirmation, saving a `.bak-*` backup first.
+- `--remove-line`: removes the MegaLens review lines from `$CODEX_HOME/AGENTS.md` after confirmation, saving a `.bak-*` backup first.
 - `--dry-run`: previews changes without modifying any files.
 
 What it writes:
 
 - `$CODEX_HOME/config.toml`: adds `[mcp_servers.megalens]` with `url = "https://megalens.ai/api/mcp?ide=codex"` and `http_headers = { "Authorization" = "Bearer <token>" }` (or updates `http_headers` with `--replace-token`). Writes atomically with `0600` permissions (tightening existing `config.toml` files to `0600` when the token is written) and saves a `.bak-*` backup before editing an existing file.
-- `$CODEX_HOME/AGENTS.md`: appends `After you change code that handles money, sign-in, user data or database migrations, and before the user commits it, offer a MegaLens review and wait for a yes before running it.`, saving a `.bak-*` backup before editing an existing file. If `$CODEX_HOME/AGENTS.override.md` exists, prints a note that Codex may prefer it.
+- `$CODEX_HOME/AGENTS.md`: appends the two missing MegaLens instruction lines:
+  - `After you change code that handles money, sign-in, user data or database migrations, and before the user commits it, offer a MegaLens review and wait for a yes before running it.`
+  - `When the user is making a decision that is hard to undo (a data model, architecture, security, a major dependency), starting a new project, or asking for deep research, offer a MegaLens review once for that task and wait for a yes before running it. Do not offer it for small questions or routine edits.`
+  Saves a `.bak-*` backup before editing an existing file. If `$CODEX_HOME/AGENTS.override.md` exists, prints a note that Codex may prefer it.
 
 Consent:
 
 - Interactive TTY only (`--yes` is not supported). When run without a TTY, it writes nothing and prints manual setup steps.
-- Shows a masked preview before each file change and requires an explicit `y` at separate `(y/n)` prompts for `config.toml` and `AGENTS.md`. Pending stdin type-ahead is discarded before each prompt, and `Ctrl-C` aborts the run with exit code `130`.
+- Shows a masked preview before each file change and requires an explicit `y` at separate confirmation prompts (`y/n` for `config.toml`, `y/N` for `AGENTS.md`). Pending stdin type-ahead is discarded before each prompt, and `Ctrl-C` aborts the run with exit code `130`.
 
 ### `setup claude-code`
 
@@ -208,7 +211,7 @@ npx megalens-mcp setup claude-code [--remove-line] [--dry-run] [-h|--help]
 - Reads `MEGALENS_TOKEN` from the environment or prompts for your token without echoing it.
 - Shows the masked `claude mcp add --scope user --transport http megalens "https://megalens.ai/api/mcp?ide=claude-code" --header "Authorization: Bearer ..."` command and runs `claude` only after you type `y` (default No). If `megalens` already exists (`claude mcp get megalens`), asks separately whether to replace it (`claude mcp remove --scope user megalens` then `add`).
 - If `claude` is not on `PATH`, writes nothing and prints the manual command and setup link (`https://megalens.ai/integrations/claude-code`).
-- Asks separately (default No) before appending the MegaLens review line to `$CLAUDE_CONFIG_DIR/CLAUDE.md` (or `~/.claude/CLAUDE.md`), saving a `.bak-*` backup and preserving line endings and permissions. Use `--remove-line` to remove that line later.
+- Asks separately (default No) before appending the missing MegaLens review lines to `$CLAUDE_CONFIG_DIR/CLAUDE.md` (or `~/.claude/CLAUDE.md`), saving a `.bak-*` backup and preserving line endings and permissions. Use `--remove-line` to remove those lines later.
 
 ### `setup antigravity` (alias `setup agy`)
 
@@ -222,7 +225,7 @@ npx megalens-mcp setup agy [--remove-line] [--dry-run] [-h|--help]
 - Reads `MEGALENS_TOKEN` from the environment or prompts for your token without echoing it.
 - Checks `~/.gemini/config/mcp_config.json` (read-only). If that file is invalid JSON, it leaves everything for Antigravity untouched and says so. If `megalens` is already configured, asks separately whether to replace it (`agy mcp remove megalens` then `add`, default No).
 - Shows the masked `agy mcp add --header "Authorization: Bearer ..." megalens "https://megalens.ai/api/mcp?ide=antigravity"` command and runs `agy` only after you type `y` (default No). If `agy` is not on `PATH`, writes nothing and prints the manual command and setup link (`https://megalens.ai/integrations/antigravity`).
-- Asks separately (default No) before appending the MegaLens review line to `~/.gemini/GEMINI.md`, saving a `.bak-*` backup and preserving line endings and permissions. Gemini CLI also reads `~/.gemini/GEMINI.md`, so that line affects Gemini CLI too. Use `--remove-line` to remove that line later.
+- Asks separately (default No) before appending the missing MegaLens review lines to `~/.gemini/GEMINI.md`, saving a `.bak-*` backup and preserving line endings and permissions. Gemini CLI also reads `~/.gemini/GEMINI.md`, so those lines affect Gemini CLI too. Use `--remove-line` to remove those lines later.
 
 ## How It Works
 

@@ -3,10 +3,14 @@ import { join, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import {
   MEGALENS_REVIEW_LINE,
+  DECISION_LINE,
+  MEGALENS_INSTRUCTION_LINES,
   TOKEN_REGEX,
   MASKED_TOKEN,
   formatInvalidSetupArgError,
   hasMegaLensReviewLine,
+  hasMegaLensDecisionLine,
+  getMissingInstructionLines,
   getReadOnlyReason,
   makeTimestamp,
   isYes,
@@ -15,12 +19,20 @@ import {
   writeFileAtomicPreservingMode,
   createPrompter,
   resolveToken,
-  runAppendInstructionLine,
+  runAppendInstructionLines,
   runRemoveInstructionLine,
 } from './setup-shared.mjs'
 
 export const CODEX_AGENTS_LINE = MEGALENS_REVIEW_LINE
-export { TOKEN_REGEX, MASKED_TOKEN, hasMegaLensReviewLine as hasMegaLensAgentsLine }
+export {
+  TOKEN_REGEX,
+  MASKED_TOKEN,
+  DECISION_LINE,
+  MEGALENS_INSTRUCTION_LINES,
+  hasMegaLensReviewLine as hasMegaLensAgentsLine,
+  hasMegaLensDecisionLine,
+  getMissingInstructionLines,
+}
 
 export const CODEX_MCP_URL = 'https://megalens.ai/api/mcp?ide=codex'
 export const FINAL_MESSAGE =
@@ -520,8 +532,9 @@ function printNonInteractiveGuide({ configPath, agentsPath, log }) {
   for (const line of formatCodexTomlBlock('ml_tok_your_token_here', '\n').trimEnd().split('\n')) {
     log(`     ${line}`)
   }
-  log(`\n  3. Add this line to ${agentsPath}:\n`)
+  log(`\n  3. Add these lines to ${agentsPath}:\n`)
   log(`     ${CODEX_AGENTS_LINE}`)
+  log(`     ${DECISION_LINE}`)
   log(`\n  4. ${FINAL_MESSAGE}\n`)
 }
 
@@ -579,7 +592,7 @@ export async function runSetupCodex(args = [], io = {}) {
 
   Options:
     --replace-token   Update the existing [mcp_servers.megalens] token in config.toml
-    --remove-line     Remove the MegaLens review line from AGENTS.md
+    --remove-line     Remove the MegaLens review lines from AGENTS.md
     --dry-run         Show what would be written without changing any files
     -h, --help        Show this help
 `)
@@ -747,9 +760,10 @@ export async function runSetupCodex(args = [], io = {}) {
     log(`  Note: ${agentsOverridePath} exists; Codex may prefer it over AGENTS.md.`)
   }
 
-  const agentsRes = await runAppendInstructionLine({
+  const agentsRes = await runAppendInstructionLines({
     filePath: agentsPath,
-    promptText: `  Add this line to ${agentsPath} so Codex offers a MegaLens review at the right moments? (y/n): `,
+    promptText: (missing) =>
+      `  Add ${missing.length > 1 ? 'these lines' : 'this line'} to ${agentsPath} so Codex offers a MegaLens review at the right moments? (y/N): `,
     dryRun: parsed.dryRun,
     prompter,
     platform,

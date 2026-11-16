@@ -9,7 +9,11 @@ import { PassThrough } from 'node:stream'
 import { spawnSync } from 'node:child_process'
 import {
   CODEX_AGENTS_LINE,
+  DECISION_LINE,
   FINAL_MESSAGE,
+  hasMegaLensAgentsLine,
+  hasMegaLensDecisionLine,
+  getMissingInstructionLines,
   runSetupCodex,
 } from '../bin/codex-setup.mjs'
 
@@ -157,13 +161,14 @@ async function newHome(useDefaultHome = false) {
   check('fresh home prompts for Add MegaLens to Codex? (y/n)',
     prompts.some((p) => p.prompt.includes('Add MegaLens to Codex? (y/n)')))
   check('fresh home prompts for AGENTS.md with exact path',
-    prompts.some((p) => p.prompt.includes(`Add this line to ${agentsPath} so Codex offers a MegaLens review at the right moments? (y/n)`)))
+    prompts.some((p) => p.prompt.includes(`Add these lines to ${agentsPath} so Codex offers a MegaLens review at the right moments? (y/N)`)))
   check('fresh home writes config.toml with ?ide=codex and Bearer token',
     configText.includes('[mcp_servers.megalens]') &&
     configText.includes('url = "https://megalens.ai/api/mcp?ide=codex"') &&
     configText.includes(`http_headers = { "Authorization" = "Bearer ${TOKEN_A}" }`))
   check('fresh home sets 0600 on new config.toml', configMode === 0o600, `got ${configMode.toString(8)}`)
-  check('fresh home creates AGENTS.md with exact line', agentsText.trim() === CODEX_AGENTS_LINE)
+  check('fresh home creates AGENTS.md with both exact lines',
+    agentsText === `${CODEX_AGENTS_LINE}\n${DECISION_LINE}\n`)
   check('fresh home creates no backups when files did not exist',
     !files.some((f) => f.includes('.bak-')))
   check('fresh home final message matches spec', out.text().includes(FINAL_MESSAGE))
@@ -187,7 +192,7 @@ async function newHome(useDefaultHome = false) {
         sentConfigAnswer = true
         setImmediate(() => pt.write('y\n'))
       }
-      if (!sentAgentsAnswer && outBuf.includes('so Codex offers a MegaLens review at the right moments? (y/n):')) {
+      if (!sentAgentsAnswer && outBuf.includes('so Codex offers a MegaLens review at the right moments? (y/N):')) {
         sentAgentsAnswer = true
         setImmediate(() => pt.write('y\n'))
       }
@@ -350,12 +355,14 @@ async function newHome(useDefaultHome = false) {
   const filesAfter = await readdir(codexHome)
   const agentsBackup = filesAfter.find((f) => f.startsWith('AGENTS.md.bak-'))
 
-  check('AGENTS.md without line appends exact line',
-    afterFirst.includes('# Global rules') && afterFirst.includes(CODEX_AGENTS_LINE))
+  check('AGENTS.md without lines appends both exact lines',
+    afterFirst.includes('# Global rules') &&
+    afterFirst.includes(CODEX_AGENTS_LINE) &&
+    afterFirst.includes(DECISION_LINE))
   check('AGENTS.md preserves mode 0644', modeAfter === 0o644, `got ${modeAfter.toString(8)}`)
   check('AGENTS.md backup created before edit', Boolean(agentsBackup))
 
-  // Second run: AGENTS.md already has MegaLens line -> idempotent, no prompt, no second append
+  // Second run: AGENTS.md already has both MegaLens lines -> idempotent, no prompt, no second append
   const out2 = makeCaptureStream()
   const err2 = makeCaptureStream()
   const p2 = makePromptScript(['n'])
@@ -371,9 +378,14 @@ async function newHome(useDefaultHome = false) {
   })
 
   const afterSecond = await readFile(agentsPath, 'utf-8')
-  const matches = afterSecond.split(CODEX_AGENTS_LINE).length - 1
-  check('AGENTS.md with MegaLens line is idempotent (only 1 prompt for config, 1 line total)',
-    afterSecond === afterFirst && matches === 1 && p2.prompts.length === 1)
+  const matches1 = afterSecond.split(CODEX_AGENTS_LINE).length - 1
+  const matches2 = afterSecond.split(DECISION_LINE).length - 1
+  check('AGENTS.md with both MegaLens lines is idempotent (only 1 prompt for config, 1 of each line total)',
+    afterSecond === afterFirst &&
+    matches1 === 1 &&
+    matches2 === 1 &&
+    p2.prompts.length === 1 &&
+    out2.text().includes('already has the MegaLens lines. Leaving it unchanged.'))
 }
 
 // ── 7. Answering n (or empty Enter) at each prompt writes nothing ────────────
@@ -425,7 +437,9 @@ async function newHome(useDefaultHome = false) {
   check('no TTY direct: exits 0, creates nothing', res.exitCode === 0 && !exists)
   check('no TTY direct: prints both blocks and manual steps without token',
     out.text().includes('[mcp_servers.megalens]') &&
+    out.text().includes('Add these lines to') &&
     out.text().includes(CODEX_AGENTS_LINE) &&
+    out.text().includes(DECISION_LINE) &&
     !out.text().includes(SECRET_PART_A))
 
   const cliRun = spawnSync(process.execPath, [CLI, 'setup', 'codex'], {
@@ -440,6 +454,7 @@ async function newHome(useDefaultHome = false) {
     !existsAfterCli &&
     cliRun.stdout.includes('[mcp_servers.megalens]') &&
     cliRun.stdout.includes(CODEX_AGENTS_LINE) &&
+    cliRun.stdout.includes(DECISION_LINE) &&
     !cliRun.stdout.includes(SECRET_PART_A))
 }
 
@@ -500,7 +515,10 @@ async function newHome(useDefaultHome = false) {
   check('CRLF config.toml preserves CRLF on every line',
     nextConfig.includes('\r\n') && !hasLoneLf(nextConfig) && nextConfig.includes(`Bearer ${TOKEN_A}`))
   check('CRLF AGENTS.md preserves CRLF on every line',
-    nextAgents.includes('\r\n') && !hasLoneLf(nextAgents) && nextAgents.includes(CODEX_AGENTS_LINE))
+    nextAgents.includes('\r\n') &&
+    !hasLoneLf(nextAgents) &&
+    nextAgents.includes(CODEX_AGENTS_LINE) &&
+    nextAgents.includes(DECISION_LINE))
 }
 
 // ── 11. Invalid token and --yes flag rejected without leaking secret ─────────
@@ -754,11 +772,12 @@ async function newHome(useDefaultHome = false) {
   })
 
   const after = await readFile(agentsPath, 'utf-8')
-  check('P3-2 AGENTS.md with unrelated MegaLens notes still gets the offer and appends the line on y',
+  check('P3-2 AGENTS.md with unrelated MegaLens notes still gets the offer and appends both lines on y',
     res.exitCode === 0 &&
     prompts.some((p) => p.prompt.includes('AGENTS.md')) &&
     after.includes(unrelated.trimEnd()) &&
-    after.includes(CODEX_AGENTS_LINE))
+    after.includes(CODEX_AGENTS_LINE) &&
+    after.includes(DECISION_LINE))
 }
 
 // ── 16. P3-4: read-only config.toml (mode 0444) is refused, writes nothing ───
@@ -892,7 +911,7 @@ async function newHome(useDefaultHome = false) {
         n1 = true
         setImmediate(() => pt.write('n\r'))
       }
-      if (!n2 && buf.includes('so Codex offers a MegaLens review at the right moments? (y/n):')) {
+      if (!n2 && buf.includes('so Codex offers a MegaLens review at the right moments? (y/N):')) {
         n2 = true
         setImmediate(() => pt.write('n\r'))
       }
@@ -1055,7 +1074,7 @@ async function newHome(useDefaultHome = false) {
   check('P3 trailing whitespace preserved as exact prefix on config.toml and AGENTS.md',
     res.exitCode === 0 &&
     afterConfig.startsWith(`${origConfig}\n[mcp_servers.megalens]`) &&
-    afterAgents.startsWith(`${origAgents}\n${CODEX_AGENTS_LINE}`))
+    afterAgents.startsWith(`${origAgents}\n${CODEX_AGENTS_LINE}\n${DECISION_LINE}\n`))
 
   // Read-only AGENTS.md (0444) refused + AGENTS.override.md note printed
   const { home: home2, codexHome: codexHome2, env: env2 } = await newHome(false)
@@ -1152,6 +1171,170 @@ async function newHome(useDefaultHome = false) {
   // cli.mjs help has no em dash
   const helpRun = spawnSync(process.execPath, [CLI, 'help'], { encoding: 'utf-8' })
   check('P3 cli.mjs help has no em dash', helpRun.status === 0 && !/[—–]/.test(helpRun.stdout))
+}
+
+// ── 23. Two-line detection & partial AGENTS.md states (0.3.9) ────────────────
+{
+  // Unit checks for separate detection of old vs new line
+  check('detection tells old and new lines apart: old only',
+    hasMegaLensAgentsLine(`${CODEX_AGENTS_LINE}\r\n`) &&
+    !hasMegaLensDecisionLine(`${CODEX_AGENTS_LINE}\r\n`) &&
+    getMissingInstructionLines(CODEX_AGENTS_LINE).length === 1 &&
+    getMissingInstructionLines(CODEX_AGENTS_LINE)[0] === DECISION_LINE)
+
+  check('detection tells old and new lines apart: new only (must NOT count as old)',
+    !hasMegaLensAgentsLine(`${DECISION_LINE}\n`) &&
+    hasMegaLensDecisionLine(`  ${DECISION_LINE}\r\n`) &&
+    getMissingInstructionLines(DECISION_LINE).length === 1 &&
+    getMissingInstructionLines(DECISION_LINE)[0] === CODEX_AGENTS_LINE)
+
+  check('detection matches user-edited variants independently (CR & BOM tolerant)',
+    hasMegaLensAgentsLine('\uFEFF- After you change code in billing, always offer a MegaLens review first.\r\n') &&
+    !hasMegaLensDecisionLine('\uFEFF- After you change code in billing, always offer a MegaLens review first.\r\n') &&
+    hasMegaLensDecisionLine('When the user is making a decision that is hard to undo, ask MegaLens.\r\n') &&
+    !hasMegaLensAgentsLine('When the user is making a decision that is hard to undo, ask MegaLens.\r\n'))
+
+  const editedOldOnly = 'Please Offer a MegaLens review before merge.'
+  check('detection restores 0.3.8 broad old-line variant alone -> only NEW line missing',
+    hasMegaLensAgentsLine(editedOldOnly) &&
+    !hasMegaLensDecisionLine(editedOldOnly) &&
+    getMissingInstructionLines(editedOldOnly).length === 1 &&
+    getMissingInstructionLines(editedOldOnly)[0] === DECISION_LINE)
+
+  const newVariantWithOffer = 'When making a decision that is hard to undo, offer a MegaLens review once.'
+  check('detection new-line variant containing "offer a MegaLens review" alone -> only OLD line missing',
+    !hasMegaLensAgentsLine(newVariantWithOffer) &&
+    hasMegaLensDecisionLine(newVariantWithOffer) &&
+    getMissingInstructionLines(newVariantWithOffer).length === 1 &&
+    getMissingInstructionLines(newVariantWithOffer)[0] === CODEX_AGENTS_LINE)
+
+  const editedOldAndNew = `${editedOldOnly}\n${DECISION_LINE}\n`
+  check('detection 0.3.8 broad old-line variant + new line -> none missing',
+    hasMegaLensAgentsLine(editedOldAndNew) &&
+    hasMegaLensDecisionLine(editedOldAndNew) &&
+    getMissingInstructionLines(editedOldAndNew).length === 0)
+
+  // Old-only AGENTS.md -> adds only new line, leaves old untouched
+  const { home: h1, codexHome: ch1, env: e1 } = await newHome(false)
+  await mkdir(ch1, { recursive: true })
+  const ap1 = join(ch1, 'AGENTS.md')
+  const oldOnly = `# Rules\n${CODEX_AGENTS_LINE}\n`
+  await writeFile(ap1, oldOnly)
+  const o1 = makeCaptureStream()
+  const p1 = makePromptScript(['n', 'y'])
+  const r1 = await runSetupCodex([], {
+    stdout: o1.stream,
+    stderr: makeCaptureStream().stream,
+    env: { ...e1, MEGALENS_TOKEN: TOKEN_A },
+    home: h1,
+    isTTY: true,
+    tomlHelpers,
+    promptOverride: p1.promptOverride,
+    now: () => new Date('2026-11-16T12:05:00.000Z'),
+  })
+  const after1 = await readFile(ap1, 'utf-8')
+  check('codex old-only AGENTS.md -> adds only new line, leaves old untouched',
+    r1.exitCode === 0 &&
+    after1 === `${oldOnly}${DECISION_LINE}\n` &&
+    o1.text().includes(`Proposed AGENTS.md line (${ap1}):`) &&
+    o1.text().includes(DECISION_LINE) &&
+    !o1.text().includes(CODEX_AGENTS_LINE) &&
+    p1.prompts.some((p) => p.prompt.includes('Add this line to')))
+
+  // Variant of old line + no new -> adds only new line, leaves variant untouched
+  const { home: h2, codexHome: ch2, env: e2 } = await newHome(false)
+  await mkdir(ch2, { recursive: true })
+  const ap2 = join(ch2, 'AGENTS.md')
+  const oldVariant = '# Rules\nAfter you change code for payments or auth, offer a MegaLens review first.\n'
+  await writeFile(ap2, oldVariant)
+  const o2 = makeCaptureStream()
+  const p2 = makePromptScript(['n', 'y'])
+  const r2 = await runSetupCodex([], {
+    stdout: o2.stream,
+    stderr: makeCaptureStream().stream,
+    env: { ...e2, MEGALENS_TOKEN: TOKEN_A },
+    home: h2,
+    isTTY: true,
+    tomlHelpers,
+    promptOverride: p2.promptOverride,
+    now: () => new Date('2026-11-16T12:06:00.000Z'),
+  })
+  check('codex variant of old line + no new -> adds only new line, variant untouched',
+    r2.exitCode === 0 &&
+    (await readFile(ap2, 'utf-8')) === `${oldVariant}${DECISION_LINE}\n`)
+
+  // New-only AGENTS.md -> adds only old line, leaves new untouched
+  const { home: h3, codexHome: ch3, env: e3 } = await newHome(false)
+  await mkdir(ch3, { recursive: true })
+  const ap3 = join(ch3, 'AGENTS.md')
+  const newOnly = `# Rules\n${DECISION_LINE}\n`
+  await writeFile(ap3, newOnly)
+  const o3 = makeCaptureStream()
+  const p3 = makePromptScript(['n', 'y'])
+  const r3 = await runSetupCodex([], {
+    stdout: o3.stream,
+    stderr: makeCaptureStream().stream,
+    env: { ...e3, MEGALENS_TOKEN: TOKEN_A },
+    home: h3,
+    isTTY: true,
+    tomlHelpers,
+    promptOverride: p3.promptOverride,
+    now: () => new Date('2026-11-16T12:07:00.000Z'),
+  })
+  check('codex new-only AGENTS.md -> adds only old line, new untouched',
+    r3.exitCode === 0 &&
+    (await readFile(ap3, 'utf-8')) === `${newOnly}${CODEX_AGENTS_LINE}\n`)
+
+  // Both present (variant of old + variant of new) -> no prompt, no change, no backup
+  const { home: h4, codexHome: ch4, env: e4 } = await newHome(false)
+  await mkdir(ch4, { recursive: true })
+  const ap4 = join(ch4, 'AGENTS.md')
+  const bothVariants = [
+    '# Rules',
+    'After you change code touching billing, offer a MegaLens review.',
+    'When making a decision that is hard to undo, ask MegaLens.',
+    '',
+  ].join('\n')
+  await writeFile(ap4, bothVariants)
+  const o4 = makeCaptureStream()
+  const p4 = makePromptScript(['n'])
+  const r4 = await runSetupCodex([], {
+    stdout: o4.stream,
+    stderr: makeCaptureStream().stream,
+    env: { ...e4, MEGALENS_TOKEN: TOKEN_A },
+    home: h4,
+    isTTY: true,
+    tomlHelpers,
+    promptOverride: p4.promptOverride,
+  })
+  check('codex both variants present -> no AGENTS.md prompt, no change, no backup',
+    r4.exitCode === 0 &&
+    p4.prompts.length === 1 &&
+    (await readFile(ap4, 'utf-8')) === bothVariants &&
+    !(await readdir(ch4)).some((f) => f.includes('.bak-')) &&
+    o4.text().includes('already has the MegaLens lines. Leaving it unchanged.'))
+
+  // --dry-run on old-only file writes nothing
+  const { home: h5, codexHome: ch5, env: e5 } = await newHome(false)
+  await mkdir(ch5, { recursive: true })
+  const ap5 = join(ch5, 'AGENTS.md')
+  await writeFile(ap5, oldOnly)
+  const o5 = makeCaptureStream()
+  const p5 = makePromptScript(['n', 'y'])
+  const r5 = await runSetupCodex(['--dry-run'], {
+    stdout: o5.stream,
+    stderr: makeCaptureStream().stream,
+    env: { ...e5, MEGALENS_TOKEN: TOKEN_A },
+    home: h5,
+    isTTY: true,
+    tomlHelpers,
+    promptOverride: p5.promptOverride,
+  })
+  check('codex --dry-run on old-only AGENTS.md writes nothing and creates no backup',
+    r5.exitCode === 0 &&
+    (await readFile(ap5, 'utf-8')) === oldOnly &&
+    !(await readdir(ch5)).some((f) => f.includes('.bak-')) &&
+    o5.text().includes('[dry-run]'))
 }
 
 await rm(root, { recursive: true, force: true })

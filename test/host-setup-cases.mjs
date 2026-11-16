@@ -10,6 +10,7 @@ import { PassThrough } from 'node:stream'
 import { spawnSync } from 'node:child_process'
 import {
   MEGALENS_REVIEW_LINE,
+  DECISION_LINE,
   CLAUDE_DOCS_URL,
   ANTIGRAVITY_DOCS_URL,
   CLAUDE_FINAL_MESSAGE,
@@ -187,11 +188,14 @@ async function readStubCalls(stubLog) {
       '--header',
       `Authorization: Bearer ${TOKEN_A}`,
     ]))
-  check('claude-code yes/yes: CLAUDE.md created with exact line and mode 0644',
-    claudeMd === `${MEGALENS_REVIEW_LINE}\n` &&
+  check('claude-code yes/yes: CLAUDE.md created with both exact lines and mode 0644',
+    claudeMd === `${MEGALENS_REVIEW_LINE}\n${DECISION_LINE}\n` &&
     ((await stat(claudeMdPath)).mode & 0o777) === 0o644)
-  check('claude-code yes/yes: prompts show path, line, masked cmd; final message matches spec; no token leak',
+  check('claude-code yes/yes: prompts show path, lines, masked cmd; final message matches spec; no token leak',
     prompts.length === 3 &&
+    out.text().includes(MEGALENS_REVIEW_LINE) &&
+    out.text().includes(DECISION_LINE) &&
+    prompts.some((p) => p.prompt.includes('Add these lines to')) &&
     out.text().includes('Authorization: Bearer ml_tok_****') &&
     out.text().includes(CLAUDE_FINAL_MESSAGE) &&
     !out.text().includes(SECRET_PART_A) &&
@@ -232,9 +236,9 @@ async function readStubCalls(stubLog) {
       'megalens',
       'https://megalens.ai/api/mcp?ide=antigravity',
     ]))
-  check('antigravity yes/yes: prompt includes Gemini CLI sentence and writes GEMINI.md',
-    prompts.some((p) => p.prompt.includes(GEMINI_CLI_SHARED_NOTE)) &&
-    geminiMd === `${MEGALENS_REVIEW_LINE}\n` &&
+  check('antigravity yes/yes: prompt includes Gemini CLI sentence and writes both lines to GEMINI.md',
+    prompts.some((p) => p.prompt.includes(GEMINI_CLI_SHARED_NOTE) && p.prompt.includes('Add these lines to')) &&
+    geminiMd === `${MEGALENS_REVIEW_LINE}\n${DECISION_LINE}\n` &&
     out.text().includes(ANTIGRAVITY_FINAL_MESSAGE) &&
     !out.text().includes(SECRET_PART_A) &&
     !err.text().includes(SECRET_PART_A))
@@ -310,8 +314,8 @@ async function readStubCalls(stubLog) {
     const p2 = makePromptScript(['y'])
     const r2 = await fn([], { stdout: o2.stream, stderr: e2.stream, env: env2, home: h2, isTTY: true, promptOverride: p2.promptOverride })
     const md2 = await readFile(join(h2, relMd), 'utf-8').catch(() => '')
-    check(`${label} CLI missing + y: writes instruction line only when user wants it`,
-      r2.exitCode === 0 && !r2.connected && r2.written.length === 1 && md2 === `${MEGALENS_REVIEW_LINE}\n`)
+    check(`${label} CLI missing + y: writes instruction lines only when user wants them`,
+      r2.exitCode === 0 && !r2.connected && r2.written.length === 1 && md2 === `${MEGALENS_REVIEW_LINE}\n${DECISION_LINE}\n`)
   }
 }
 
@@ -463,23 +467,24 @@ async function readStubCalls(stubLog) {
   }
 }
 
-// ── 8. Existing line (no duplicate), backup + mode preserved, CRLF preserved, symlink preserved ─
+// ── 8. Existing lines (no duplicate), backup + mode preserved, CRLF preserved, symlink preserved ─
 {
-  // Existing line -> no prompt, no duplicate, no backup
+  // Both lines already present -> no prompt, no duplicate, no backup
   const { home, env } = await newCaseEnv('claude', { MEGALENS_TOKEN: TOKEN_A })
   const claudeDir = join(home, '.claude')
   await mkdir(claudeDir, { recursive: true })
   const claudeMdPath = join(claudeDir, 'CLAUDE.md')
-  const existing = `# My Rules\nPlease Offer a MegaLens review before merge.\n`
+  const existing = `# My Rules\n${MEGALENS_REVIEW_LINE}\n${DECISION_LINE}\n`
   await writeFile(claudeMdPath, existing)
   const out = makeCaptureStream()
   const err = makeCaptureStream()
   const { prompts, promptOverride } = makePromptScript(['n'])
   const res = await runSetupClaudeCode([], { stdout: out.stream, stderr: err.stream, env, home, isTTY: true, promptOverride })
   const files = await readdir(claudeDir)
-  check('existing MegaLens review line: skipped with no duplicate and no backup',
+  check('existing MegaLens lines: skipped with no duplicate and no backup',
     res.exitCode === 0 &&
     prompts.length === 1 &&
+    out.text().includes('already has the MegaLens lines. Leaving it unchanged.') &&
     (await readFile(claudeMdPath, 'utf-8')) === existing &&
     !files.some((f) => f.includes('.bak-')))
 
@@ -513,7 +518,7 @@ async function readStubCalls(stubLog) {
   const lstatLink = await stat(linkPath)
   check('CRLF + mode 0640 + backup + symlink preserved on GEMINI.md',
     r2.exitCode === 0 &&
-    afterStr === `# Header\r\nRule 1\r\n${MEGALENS_REVIEW_LINE}\r\n` &&
+    afterStr === `# Header\r\nRule 1\r\n${MEGALENS_REVIEW_LINE}\r\n${DECISION_LINE}\r\n` &&
     (st.mode & 0o777) === 0o640 &&
     lstatLink.ino === st.ino &&
     dirFiles.some((f) => f.startsWith('dotfiles-GEMINI.md.bak-')))
@@ -573,6 +578,9 @@ async function readStubCalls(stubLog) {
       cliRun.status === 0 &&
       calls2.length === 0 &&
       (await readdir(h2)).length === 0 &&
+      cliRun.stdout.includes('Add these lines to') &&
+      cliRun.stdout.includes(MEGALENS_REVIEW_LINE) &&
+      cliRun.stdout.includes(DECISION_LINE) &&
       !cliRun.stdout.includes(SECRET_PART_A) &&
       !cliRun.stderr.includes(SECRET_PART_A))
   }
@@ -669,12 +677,12 @@ async function readStubCalls(stubLog) {
 
 // ── 12. --remove-line across claude-code, antigravity, and codex ──────────────
 {
-  // Claude Code --remove-line: removes only exact line, keeps surrounding & custom MegaLens line, preserves CRLF & mode 0640, creates backup
+  // Claude Code --remove-line: removes both exact lines in 1 prompt, keeps surrounding & custom/variant lines, preserves CRLF & mode 0640, creates backup
   const { home, stubLog, env } = await newCaseEnv('claude')
   const claudeDir = join(home, '.claude')
   await mkdir(claudeDir, { recursive: true })
   const mdPath = join(claudeDir, 'CLAUDE.md')
-  const initial = `# Top\r\n# Custom: offer a MegaLens review manually\r\n${MEGALENS_REVIEW_LINE}\r\n# Bottom\r\n`
+  const initial = `# Top\r\n# Custom: offer a MegaLens review manually\r\nPlease Offer a MegaLens review before merge.\r\nAfter you change code in billing, offer a MegaLens review.\r\n${MEGALENS_REVIEW_LINE}\r\n${DECISION_LINE}\r\n# Bottom\r\n`
   await writeFile(mdPath, initial, { mode: 0o640 })
   await chmod(mdPath, 0o640)
 
@@ -692,10 +700,12 @@ async function readStubCalls(stubLog) {
   })
   const after = await readFile(mdPath, 'utf-8')
   const files = await readdir(claudeDir)
-  check('claude-code --remove-line: removes only exact line, preserves CRLF/mode/custom line, backs up, calls no stub',
+  check('claude-code --remove-line: removes both exact lines in 1 prompt, preserves CRLF/mode/custom/variant lines, backs up, calls no stub',
     res.exitCode === 0 &&
     prompts.length === 1 &&
-    after === '# Top\r\n# Custom: offer a MegaLens review manually\r\n# Bottom\r\n' &&
+    out.text().includes(`- ${MEGALENS_REVIEW_LINE}`) &&
+    out.text().includes(`- ${DECISION_LINE}`) &&
+    after === '# Top\r\n# Custom: offer a MegaLens review manually\r\nPlease Offer a MegaLens review before merge.\r\nAfter you change code in billing, offer a MegaLens review.\r\n# Bottom\r\n' &&
     ((await stat(mdPath)).mode & 0o777) === 0o640 &&
     files.some((f) => f.startsWith('CLAUDE.md.bak-')) &&
     (await readStubCalls(stubLog)).length === 0)
@@ -705,7 +715,7 @@ async function readStubCalls(stubLog) {
   const gemDir = join(ah, '.gemini')
   await mkdir(gemDir, { recursive: true })
   const gPath = join(gemDir, 'GEMINI.md')
-  const gInit = `${MEGALENS_REVIEW_LINE}\n# Keep\n`
+  const gInit = `${MEGALENS_REVIEW_LINE}\n${DECISION_LINE}\n# Keep\n`
   await writeFile(gPath, gInit)
   const ao = makeCaptureStream()
   const ap = makePromptScript([''])
@@ -713,23 +723,24 @@ async function readStubCalls(stubLog) {
   check('antigravity --remove-line with empty answer (default No): leaves GEMINI.md untouched',
     ares.exitCode === 0 && (await readFile(gPath, 'utf-8')) === gInit && !(await readdir(gemDir)).some((f) => f.includes('.bak-')))
 
-  // Antigravity --remove-line with y -> removes only exact line and creates backup
+  // Antigravity --remove-line with y -> removes both exact lines in 1 prompt and creates backup
   const ao2 = makeCaptureStream()
   const ap2 = makePromptScript(['y'])
   const ares2 = await runSetupAntigravity(['--remove-line'], { stdout: ao2.stream, stderr: makeCaptureStream().stream, env: ae, home: ah, isTTY: true, promptOverride: ap2.promptOverride })
-  check('antigravity --remove-line with y: removes exact line and keeps rest',
+  check('antigravity --remove-line with y: removes both exact lines and keeps rest',
     ares2.exitCode === 0 &&
+    ap2.prompts.length === 1 &&
     (await readFile(gPath, 'utf-8')) === '# Keep\n' &&
     (await readdir(gemDir)).some((f) => f.startsWith('GEMINI.md.bak-')))
 
-  // Codex --remove-line: removes exact line from AGENTS.md without touching config.toml
+  // Codex --remove-line: removes both exact lines from AGENTS.md without touching config.toml
   const { home: ch, env: ce } = await newCaseEnv('codex')
   const codexDir = join(ch, '.codex')
   await mkdir(codexDir, { recursive: true })
   const agentsPath = join(codexDir, 'AGENTS.md')
   const cfgPath = join(codexDir, 'config.toml')
   await writeFile(cfgPath, 'model = "o3"\n')
-  await writeFile(agentsPath, `# Codex\n${MEGALENS_REVIEW_LINE}\n`)
+  await writeFile(agentsPath, `# Codex\n${MEGALENS_REVIEW_LINE}\n${DECISION_LINE}\n# Other rule\n`)
   const co = makeCaptureStream()
   const cp = makePromptScript(['y'])
   const cres = await runSetupCodex(['--remove-line'], {
@@ -740,9 +751,10 @@ async function readStubCalls(stubLog) {
     isTTY: true,
     promptOverride: cp.promptOverride,
   })
-  check('codex --remove-line: removes exact line from AGENTS.md and leaves config.toml untouched',
+  check('codex --remove-line: removes both exact lines from AGENTS.md and leaves other lines & config.toml untouched',
     cres.exitCode === 0 &&
-    (await readFile(agentsPath, 'utf-8')) === '# Codex\n' &&
+    cp.prompts.length === 1 &&
+    (await readFile(agentsPath, 'utf-8')) === '# Codex\n# Other rule\n' &&
     (await readFile(cfgPath, 'utf-8')) === 'model = "o3"\n')
 
   // Codex --remove-line + --replace-token rejected
@@ -1094,7 +1106,7 @@ async function readStubCalls(stubLog) {
   const cDir3 = join(h3, '.claude')
   await mkdir(cDir3, { recursive: true })
   const mdPath3 = join(cDir3, 'CLAUDE.md')
-  const mdInit3 = `# Header\n${MEGALENS_REVIEW_LINE}\n`
+  const mdInit3 = `# Header\n${MEGALENS_REVIEW_LINE}\n${DECISION_LINE}\n`
   await writeFile(mdPath3, mdInit3)
   const o3 = makeCaptureStream()
   const er3 = makeCaptureStream()
@@ -1269,7 +1281,7 @@ async function readStubCalls(stubLog) {
   check('P2-3 CLAUDE_CONFIG_DIR honoured in setup: writes $CLAUDE_CONFIG_DIR/CLAUDE.md',
     rCfg1.exitCode === 0 &&
     rCfg1.written.includes(customClaudeMd) &&
-    (await readFile(customClaudeMd, 'utf-8')) === `${MEGALENS_REVIEW_LINE}\n` &&
+    (await readFile(customClaudeMd, 'utf-8')) === `${MEGALENS_REVIEW_LINE}\n${DECISION_LINE}\n` &&
     !defaultExistsAfterSetup)
 
   const oCfg2 = makeCaptureStream()
@@ -1316,7 +1328,7 @@ async function readStubCalls(stubLog) {
     const callsProj = await readStubCalls(lProj)
     const mdPathProj = join(hProj, '.claude', 'CLAUDE.md')
     const mdWritten = expectWritten
-      ? (await readFile(mdPathProj, 'utf-8').catch(() => '')) === `${MEGALENS_REVIEW_LINE}\n`
+      ? (await readFile(mdPathProj, 'utf-8').catch(() => '')) === `${MEGALENS_REVIEW_LINE}\n${DECISION_LINE}\n`
       : !(await stat(mdPathProj).then(() => true, () => false))
     check(`P2-4 project/local-scoped megalens entry (${label}): continues to CLAUDE.md and exits 0`,
       rProj.exitCode === 0 &&
@@ -1352,6 +1364,208 @@ async function readStubCalls(stubLog) {
     pAgyK.prompts.some((p) => p.prompt.includes('Add MegaLens to Antigravity? (y/N):')) &&
     !pAgyK.prompts.some((p) => p.prompt.includes('Replace existing')) &&
     (await readStubCalls(lAgyK)).length === 0)
+}
+
+// ── 20. Two-line partial/variant/remove-line coverage for claude-code & agy (0.3.9) ─
+{
+  // claude-code with CLAUDE_CONFIG_DIR: old-only -> only new added, old untouched
+  const { dir: d1, home: h1, env: e1 } = await newCaseEnv('claude', { MEGALENS_TOKEN: TOKEN_A })
+  const cfgDir1 = join(d1, 'claude-cfg')
+  await mkdir(cfgDir1, { recursive: true })
+  const md1 = join(cfgDir1, 'CLAUDE.md')
+  const oldOnly1 = `# Notes\n${MEGALENS_REVIEW_LINE}\n`
+  await writeFile(md1, oldOnly1)
+  const o1 = makeCaptureStream()
+  const p1 = makePromptScript(['n', 'y'])
+  const r1 = await runSetupClaudeCode([], {
+    stdout: o1.stream,
+    stderr: makeCaptureStream().stream,
+    env: { ...e1, CLAUDE_CONFIG_DIR: cfgDir1 },
+    home: h1,
+    isTTY: true,
+    promptOverride: p1.promptOverride,
+    now: () => new Date('2026-11-16T12:10:00.000Z'),
+  })
+  check('claude-code (CLAUDE_CONFIG_DIR) old-only -> adds only new line, old untouched',
+    r1.exitCode === 0 &&
+    (await readFile(md1, 'utf-8')) === `${oldOnly1}${DECISION_LINE}\n` &&
+    !o1.text().includes(MEGALENS_REVIEW_LINE) &&
+    o1.text().includes(DECISION_LINE))
+
+  // claude-code variant of old line + no new -> only new added, variant untouched
+  const { home: h2, env: e2 } = await newCaseEnv('claude', { MEGALENS_TOKEN: TOKEN_A })
+  const cDir2 = join(h2, '.claude')
+  await mkdir(cDir2, { recursive: true })
+  const md2 = join(cDir2, 'CLAUDE.md')
+  const variant2 = '# Rules\nAfter you change code in auth, offer a MegaLens review before commit.\n'
+  await writeFile(md2, variant2)
+  const o2 = makeCaptureStream()
+  const p2 = makePromptScript(['n', 'y'])
+  const r2 = await runSetupClaudeCode([], {
+    stdout: o2.stream,
+    stderr: makeCaptureStream().stream,
+    env: e2,
+    home: h2,
+    isTTY: true,
+    promptOverride: p2.promptOverride,
+    now: () => new Date('2026-11-16T12:11:00.000Z'),
+  })
+  check('claude-code variant of old line + no new -> adds only new line, variant untouched',
+    r2.exitCode === 0 &&
+    (await readFile(md2, 'utf-8')) === `${variant2}${DECISION_LINE}\n`)
+
+  // agy old-only -> only new added, keeps Gemini CLI sentence; then second run -> no change
+  const { home: h3, env: e3 } = await newCaseEnv('agy', { MEGALENS_TOKEN: TOKEN_A })
+  const gDir3 = join(h3, '.gemini')
+  await mkdir(gDir3, { recursive: true })
+  const gPath3 = join(gDir3, 'GEMINI.md')
+  const oldOnly3 = `# Rules\n${MEGALENS_REVIEW_LINE}\n`
+  await writeFile(gPath3, oldOnly3)
+  const o3 = makeCaptureStream()
+  const p3 = makePromptScript(['n', 'y'])
+  const r3 = await runSetupAntigravity([], {
+    stdout: o3.stream,
+    stderr: makeCaptureStream().stream,
+    env: e3,
+    home: h3,
+    isTTY: true,
+    promptOverride: p3.promptOverride,
+    now: () => new Date('2026-11-16T12:12:00.000Z'),
+  })
+  const after3 = await readFile(gPath3, 'utf-8')
+  check('agy old-only -> adds only new line, keeps Gemini CLI sentence, old untouched',
+    r3.exitCode === 0 &&
+    after3 === `${oldOnly3}${DECISION_LINE}\n` &&
+    p3.prompts.some((p) => p.prompt.includes('Gemini CLI also reads this file')))
+
+  // Second run on agy with both present -> no prompt for GEMINI.md, no change, no new backup
+  const o3b = makeCaptureStream()
+  const p3b = makePromptScript(['n'])
+  const r3b = await runSetupAntigravity([], {
+    stdout: o3b.stream,
+    stderr: makeCaptureStream().stream,
+    env: e3,
+    home: h3,
+    isTTY: true,
+    promptOverride: p3b.promptOverride,
+  })
+  check('agy both present -> no prompt for GEMINI.md, no change',
+    r3b.exitCode === 0 &&
+    p3b.prompts.length === 1 &&
+    (await readFile(gPath3, 'utf-8')) === after3 &&
+    o3b.text().includes('already has the MegaLens lines. Leaving it unchanged.'))
+
+  // agy variant of old line + no new -> only new added
+  const { home: h4, env: e4 } = await newCaseEnv('agy', { MEGALENS_TOKEN: TOKEN_A })
+  const gDir4 = join(h4, '.gemini')
+  await mkdir(gDir4, { recursive: true })
+  const gPath4 = join(gDir4, 'GEMINI.md')
+  const variant4 = '# Rules\nAfter you change code touching money, offer a MegaLens review.\n'
+  await writeFile(gPath4, variant4)
+  const o4 = makeCaptureStream()
+  const p4 = makePromptScript(['n', 'y'])
+  const r4 = await runSetupAntigravity([], {
+    stdout: o4.stream,
+    stderr: makeCaptureStream().stream,
+    env: e4,
+    home: h4,
+    isTTY: true,
+    promptOverride: p4.promptOverride,
+    now: () => new Date('2026-11-16T12:13:00.000Z'),
+  })
+  check('agy variant of old line + no new -> adds only new line, variant untouched',
+    r4.exitCode === 0 &&
+    (await readFile(gPath4, 'utf-8')) === `${variant4}${DECISION_LINE}\n`)
+
+  // --remove-line non-TTY writes nothing and prints both exact lines
+  const { home: h5, env: e5 } = await newCaseEnv('agy')
+  const gDir5 = join(h5, '.gemini')
+  await mkdir(gDir5, { recursive: true })
+  const gPath5 = join(gDir5, 'GEMINI.md')
+  const init5 = `${MEGALENS_REVIEW_LINE}\n${DECISION_LINE}\n`
+  await writeFile(gPath5, init5)
+  const o5 = makeCaptureStream()
+  const r5 = await runSetupAntigravity(['--remove-line'], {
+    stdout: o5.stream,
+    stderr: makeCaptureStream().stream,
+    env: e5,
+    home: h5,
+    isTTY: false,
+  })
+  check('agy --remove-line non-TTY: writes nothing and prints both exact lines',
+    r5.exitCode === 0 &&
+    (await readFile(gPath5, 'utf-8')) === init5 &&
+    o5.text().includes(MEGALENS_REVIEW_LINE) &&
+    o5.text().includes(DECISION_LINE))
+
+  // Restored 0.3.8 variant ("Please Offer a MegaLens review before merge.") end-to-end:
+  // 1) old variant alone -> only NEW line missing and appended
+  const { home: h6, env: e6 } = await newCaseEnv('claude', { MEGALENS_TOKEN: TOKEN_A })
+  const cDir6 = join(h6, '.claude')
+  await mkdir(cDir6, { recursive: true })
+  const md6 = join(cDir6, 'CLAUDE.md')
+  const oldBroad6 = '# My Rules\nPlease Offer a MegaLens review before merge.\n'
+  await writeFile(md6, oldBroad6)
+  const o6 = makeCaptureStream()
+  const p6 = makePromptScript(['n', 'y'])
+  const r6 = await runSetupClaudeCode([], {
+    stdout: o6.stream,
+    stderr: makeCaptureStream().stream,
+    env: e6,
+    home: h6,
+    isTTY: true,
+    promptOverride: p6.promptOverride,
+    now: () => new Date('2026-11-16T12:14:00.000Z'),
+  })
+  const after6 = await readFile(md6, 'utf-8')
+  check('claude-code "Please Offer a MegaLens review before merge." alone -> only NEW line missing and appended',
+    r6.exitCode === 0 &&
+    after6 === `${oldBroad6}${DECISION_LINE}\n` &&
+    !o6.text().includes(MEGALENS_REVIEW_LINE) &&
+    o6.text().includes(DECISION_LINE))
+
+  // 2) both ("Please Offer a MegaLens review before merge." + DECISION_LINE) -> none missing, no prompt, no backup
+  const o6b = makeCaptureStream()
+  const p6b = makePromptScript(['n'])
+  const r6b = await runSetupClaudeCode([], {
+    stdout: o6b.stream,
+    stderr: makeCaptureStream().stream,
+    env: e6,
+    home: h6,
+    isTTY: true,
+    promptOverride: p6b.promptOverride,
+  })
+  const files6b = await readdir(cDir6)
+  check('claude-code "Please Offer a MegaLens review before merge." + new line -> none missing, unchanged',
+    r6b.exitCode === 0 &&
+    p6b.prompts.length === 1 &&
+    (await readFile(md6, 'utf-8')) === after6 &&
+    files6b.filter((f) => f.includes('.bak-')).length === 1 &&
+    o6b.text().includes('already has the MegaLens lines. Leaving it unchanged.'))
+
+  // 3) new line alone -> only OLD line missing and appended
+  const { home: h7, env: e7 } = await newCaseEnv('claude', { MEGALENS_TOKEN: TOKEN_A })
+  const cDir7 = join(h7, '.claude')
+  await mkdir(cDir7, { recursive: true })
+  const md7 = join(cDir7, 'CLAUDE.md')
+  const newOnly7 = `# My Rules\n${DECISION_LINE}\n`
+  await writeFile(md7, newOnly7)
+  const o7 = makeCaptureStream()
+  const p7 = makePromptScript(['n', 'y'])
+  const r7 = await runSetupClaudeCode([], {
+    stdout: o7.stream,
+    stderr: makeCaptureStream().stream,
+    env: e7,
+    home: h7,
+    isTTY: true,
+    promptOverride: p7.promptOverride,
+    now: () => new Date('2026-11-16T12:15:00.000Z'),
+  })
+  check('claude-code new line alone -> only OLD line missing and appended',
+    r7.exitCode === 0 &&
+    (await readFile(md7, 'utf-8')) === `${newOnly7}${MEGALENS_REVIEW_LINE}\n` &&
+    o7.text().includes(MEGALENS_REVIEW_LINE) &&
+    !o7.text().includes('Add these lines'))
 }
 
 await rm(root, { recursive: true, force: true })

@@ -5,6 +5,8 @@ import { delimiter, join, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import {
   MEGALENS_REVIEW_LINE,
+  DECISION_LINE,
+  MEGALENS_INSTRUCTION_LINES,
   TOKEN_REGEX,
   MASKED_TOKEN,
   maskTokenSecrets,
@@ -14,11 +16,17 @@ import {
   readOptionalFile,
   createPrompter,
   resolveToken,
-  runAppendInstructionLine,
+  runAppendInstructionLines,
   runRemoveInstructionLine,
 } from './setup-shared.mjs'
 
-export { MEGALENS_REVIEW_LINE, TOKEN_REGEX, MASKED_TOKEN }
+export {
+  MEGALENS_REVIEW_LINE,
+  DECISION_LINE,
+  MEGALENS_INSTRUCTION_LINES,
+  TOKEN_REGEX,
+  MASKED_TOKEN,
+}
 
 export const HOST_CLI_GET_TIMEOUT_MS = 20_000
 export const HOST_CLI_MUTATE_TIMEOUT_MS = 60_000
@@ -32,6 +40,8 @@ export const CLAUDE_FINAL_MESSAGE =
 export const ANTIGRAVITY_FINAL_MESSAGE =
   'Restart Antigravity, then ask it to get a second opinion from MegaLens on your next change.'
 export const GEMINI_CLI_SHARED_NOTE =
+  'Gemini CLI also reads this file, so these lines affect Gemini CLI too.'
+export const GEMINI_CLI_SHARED_NOTE_SINGLE =
   'Gemini CLI also reads this file, so this line affects Gemini CLI too.'
 
 export function resolveClaudeConfigDir(env = process.env, home = homedir()) {
@@ -78,6 +88,7 @@ const HOST_SPECS = {
     mcpConfigPath: (home) => join(home, '.gemini', 'config', 'mcp_config.json'),
     instructionsPath: (home) => join(home, '.gemini', 'GEMINI.md'),
     instructionsNote: GEMINI_CLI_SHARED_NOTE,
+    instructionsNoteSingle: GEMINI_CLI_SHARED_NOTE_SINGLE,
     finalMessage: ANTIGRAVITY_FINAL_MESSAGE,
     checkCommand: 'agy mcp list',
     getAddArgs: (token) => [
@@ -260,8 +271,9 @@ function printNonInteractiveGuide(spec, instructionsPath, log) {
   log(`  2. Run:\n`)
   log(`     ${spec.formatMaskedAddCommand('ml_tok_your_token_here')}`)
   log(`     Docs: ${spec.docsUrl}`)
-  log(`\n  3. Add this line to ${instructionsPath}:\n`)
+  log(`\n  3. Add these lines to ${instructionsPath}:\n`)
   log(`     ${MEGALENS_REVIEW_LINE}`)
+  log(`     ${DECISION_LINE}`)
   if (spec.instructionsNote) {
     log(`     Note: ${spec.instructionsNote}`)
   }
@@ -324,7 +336,7 @@ async function runSetupHost(spec, args = [], io = {}) {
   Usage: npx megalens-mcp ${spec.usageCommand} [options]
 
   Options:
-    --remove-line   Remove the MegaLens review line from ${spec.id === 'claude-code' ? '~/.claude/CLAUDE.md' : '~/.gemini/GEMINI.md'}
+    --remove-line   Remove the MegaLens review lines from ${spec.id === 'claude-code' ? '~/.claude/CLAUDE.md' : '~/.gemini/GEMINI.md'}
     --dry-run       Show what would run or be written without changing anything
     -h, --help      Show this help
 `)
@@ -523,11 +535,18 @@ async function runSetupHost(spec, args = [], io = {}) {
   }
 
   // ── 3. Global instruction file ──
-  const promptText = spec.instructionsNote
-    ? `  Add this line to ${instructionsPath} so ${spec.displayName} offers a MegaLens review at the right moments? ${spec.instructionsNote} (y/N): `
-    : `  Add this line to ${instructionsPath} so ${spec.displayName} offers a MegaLens review at the right moments? (y/N): `
+  const promptText = (missing) => {
+    const noun = missing.length > 1 ? 'these lines' : 'this line'
+    if (spec.instructionsNote) {
+      const note = missing.length > 1
+        ? spec.instructionsNote
+        : spec.instructionsNoteSingle ?? spec.instructionsNote
+      return `  Add ${noun} to ${instructionsPath} so ${spec.displayName} offers a MegaLens review at the right moments? ${note} (y/N): `
+    }
+    return `  Add ${noun} to ${instructionsPath} so ${spec.displayName} offers a MegaLens review at the right moments? (y/N): `
+  }
 
-  const instRes = await runAppendInstructionLine({
+  const instRes = await runAppendInstructionLines({
     filePath: instructionsPath,
     promptText,
     dryRun: parsed.dryRun,
