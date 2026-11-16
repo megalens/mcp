@@ -167,6 +167,8 @@ for the rate and how reviews are counted, including plans with AI usage included
 |---------|-------------|
 | `megalens-mcp setup` | Interactive setup: detect tools, write config |
 | `megalens-mcp setup codex` | Interactive Codex setup (`config.toml` + `AGENTS.md`) |
+| `megalens-mcp setup claude-code` | Interactive Claude Code setup (`claude mcp add` + `CLAUDE.md`) |
+| `megalens-mcp setup antigravity` | Interactive Antigravity setup (`agy mcp add` + `GEMINI.md`), alias `setup agy` |
 | `megalens-mcp validate` | Test your token connectivity |
 | `megalens-mcp config` | Show current config status |
 
@@ -175,12 +177,13 @@ for the rate and how reviews are counted, including plans with AI usage included
 Usage:
 
 ```bash
-npx megalens-mcp setup codex [--replace-token] [--dry-run] [-h|--help]
+npx megalens-mcp setup codex [--replace-token] [--remove-line] [--dry-run] [-h|--help]
 ```
 
 - Uses `$CODEX_HOME` if set, otherwise `~/.codex`.
 - Reads `MEGALENS_TOKEN` from the environment or prompts for your token without echoing it.
 - `--replace-token`: updates `http_headers` in an existing `[mcp_servers.megalens]` table.
+- `--remove-line`: removes the MegaLens review line from `$CODEX_HOME/AGENTS.md` after confirmation, saving a `.bak-*` backup first.
 - `--dry-run`: previews changes without modifying any files.
 
 What it writes:
@@ -192,6 +195,34 @@ Consent:
 
 - Interactive TTY only (`--yes` is not supported). When run without a TTY, it writes nothing and prints manual setup steps.
 - Shows a masked preview before each file change and requires an explicit `y` at separate `(y/n)` prompts for `config.toml` and `AGENTS.md`. Pending stdin type-ahead is discarded before each prompt, and `Ctrl-C` aborts the run with exit code `130`.
+
+### `setup claude-code`
+
+Usage:
+
+```bash
+npx megalens-mcp setup claude-code [--remove-line] [--dry-run] [-h|--help]
+```
+
+- Uses `$CLAUDE_CONFIG_DIR` if set, otherwise `~/.claude`, for `CLAUDE.md`.
+- Reads `MEGALENS_TOKEN` from the environment or prompts for your token without echoing it.
+- Shows the masked `claude mcp add --scope user --transport http megalens "https://megalens.ai/api/mcp?ide=claude-code" --header "Authorization: Bearer ..."` command and runs `claude` only after you type `y` (default No). If `megalens` already exists (`claude mcp get megalens`), asks separately whether to replace it (`claude mcp remove --scope user megalens` then `add`).
+- If `claude` is not on `PATH`, writes nothing and prints the manual command and setup link (`https://megalens.ai/integrations/claude-code`).
+- Asks separately (default No) before appending the MegaLens review line to `$CLAUDE_CONFIG_DIR/CLAUDE.md` (or `~/.claude/CLAUDE.md`), saving a `.bak-*` backup and preserving line endings and permissions. Use `--remove-line` to remove that line later.
+
+### `setup antigravity` (alias `setup agy`)
+
+Usage:
+
+```bash
+npx megalens-mcp setup antigravity [--remove-line] [--dry-run] [-h|--help]
+npx megalens-mcp setup agy [--remove-line] [--dry-run] [-h|--help]
+```
+
+- Reads `MEGALENS_TOKEN` from the environment or prompts for your token without echoing it.
+- Checks `~/.gemini/config/mcp_config.json` (read-only). If that file is invalid JSON, it leaves everything for Antigravity untouched and says so. If `megalens` is already configured, asks separately whether to replace it (`agy mcp remove megalens` then `add`, default No).
+- Shows the masked `agy mcp add --header "Authorization: Bearer ..." megalens "https://megalens.ai/api/mcp?ide=antigravity"` command and runs `agy` only after you type `y` (default No). If `agy` is not on `PATH`, writes nothing and prints the manual command and setup link (`https://megalens.ai/integrations/antigravity`).
+- Asks separately (default No) before appending the MegaLens review line to `~/.gemini/GEMINI.md`, saving a `.bak-*` backup and preserving line endings and permissions. Gemini CLI also reads `~/.gemini/GEMINI.md`, so that line affects Gemini CLI too. Use `--remove-line` to remove that line later.
 
 ## How It Works
 

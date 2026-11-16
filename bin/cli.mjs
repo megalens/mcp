@@ -4,10 +4,13 @@
  * @megalens/mcp — CLI setup helper
  *
  * Usage:
- *   megalens-mcp setup           Interactive setup: detect tool, write config
- *   megalens-mcp setup codex     Interactive Codex setup (config.toml + AGENTS.md)
- *   megalens-mcp validate        Test your token connectivity
- *   megalens-mcp config          Show current config location + status
+ *   megalens-mcp setup                Interactive setup: detect tool, write config
+ *   megalens-mcp setup codex          Interactive Codex setup (config.toml + AGENTS.md)
+ *   megalens-mcp setup claude-code    Interactive Claude Code setup (CLI + CLAUDE.md)
+ *   megalens-mcp setup antigravity    Interactive Antigravity setup (CLI + GEMINI.md)
+ *   megalens-mcp setup agy            Alias for setup antigravity
+ *   megalens-mcp validate             Test your token connectivity
+ *   megalens-mcp config               Show current config location + status
  */
 
 import { readFile, writeFile, access, mkdir, chmod, rename, unlink, realpath, stat, chown } from 'fs/promises'
@@ -15,6 +18,8 @@ import { join } from 'path'
 import { homedir } from 'os'
 import { createInterface } from 'readline'
 import { runSetupCodex } from './codex-setup.mjs'
+import { runSetupClaudeCode, runSetupAntigravity } from './host-setup.mjs'
+import { maskTokenSecrets } from './setup-shared.mjs'
 
 const API_BASE = 'https://megalens.ai'
 const MCP_URL = `${API_BASE}/api/mcp`
@@ -639,19 +644,55 @@ async function cmdConfig() {
 
 // ── Main ──
 
+const HELP_TEXT = `
+  Usage: megalens-mcp <command>
+
+  Commands:
+    setup                Interactive setup: detect tools, write config
+    setup codex          Interactive Codex setup (config.toml + AGENTS.md)
+    setup claude-code    Interactive Claude Code setup (CLI + CLAUDE.md)
+    setup antigravity    Interactive Antigravity setup (CLI + GEMINI.md)
+    setup agy            Alias for setup antigravity
+    validate             Test your token connectivity
+    config               Show current config locations + status
+    help                 Show this help
+`
+
+const VALID_SETUP_TARGETS = ['codex', 'claude-code', 'antigravity', 'agy']
+
 const cmd = process.argv[2] || 'setup'
 
 switch (cmd) {
-  case 'setup':
-    if (process.argv[3] === 'codex') {
+  case 'setup': {
+    const target = process.argv[3]
+    if (target === 'codex') {
       const result = await runSetupCodex(process.argv.slice(4), {
         tomlHelpers: { scanTomlLine, tomlHeaderPath, stripTomlTable },
       })
       if (result.exitCode) process.exitCode = result.exitCode
-    } else {
+    } else if (target === 'claude-code') {
+      const result = await runSetupClaudeCode(process.argv.slice(4))
+      if (result.exitCode) process.exitCode = result.exitCode
+    } else if (target === 'antigravity' || target === 'agy') {
+      const result = await runSetupAntigravity(process.argv.slice(4))
+      if (result.exitCode) process.exitCode = result.exitCode
+    } else if (target === '--help' || target === '-h') {
+      console.log(HELP_TEXT)
+    } else if (target === '--dry-run') {
+      console.error('  The generic `setup` wizard does not support --dry-run (nothing was written).')
+      console.error(`  Valid targets that support --dry-run: ${VALID_SETUP_TARGETS.join(', ')}`)
+      console.error('  Example: megalens-mcp setup codex --dry-run')
+      process.exit(1)
+    } else if (!target) {
       await cmdSetup()
+    } else {
+      console.error(`  Unknown setup target: ${maskTokenSecrets(target)}.`)
+      console.error(`  Valid targets: ${VALID_SETUP_TARGETS.join(', ')}`)
+      console.error("  Run 'megalens-mcp help' for usage.")
+      process.exit(1)
     }
     break
+  }
   case 'validate':
     await cmdValidate()
     break
@@ -661,18 +702,9 @@ switch (cmd) {
   case 'help':
   case '--help':
   case '-h':
-    console.log(`
-  Usage: megalens-mcp <command>
-
-  Commands:
-    setup         Interactive setup: detect tools, write config
-    setup codex   Interactive Codex setup (config.toml + AGENTS.md)
-    validate      Test your token connectivity
-    config        Show current config locations + status
-    help          Show this help
-`)
+    console.log(HELP_TEXT)
     break
   default:
-    console.error(`  Unknown command: ${cmd}. Run 'megalens-mcp help' for usage.`)
+    console.error(`  Unknown command: ${maskTokenSecrets(cmd)}. Run 'megalens-mcp help' for usage.`)
     process.exit(1)
 }

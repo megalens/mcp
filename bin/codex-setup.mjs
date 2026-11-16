@@ -1,15 +1,28 @@
-import { readFile, writeFile, copyFile, mkdir, chmod, rename, unlink, realpath, stat, chown, access } from 'node:fs/promises'
-import { constants } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { readFile, realpath, access } from 'node:fs/promises'
+import { join, resolve } from 'node:path'
 import { homedir } from 'node:os'
-import { createInterface } from 'node:readline'
+import {
+  MEGALENS_REVIEW_LINE,
+  TOKEN_REGEX,
+  MASKED_TOKEN,
+  formatInvalidSetupArgError,
+  hasMegaLensReviewLine,
+  getReadOnlyReason,
+  makeTimestamp,
+  isYes,
+  readOptionalFile,
+  backupExistingFile,
+  writeFileAtomicPreservingMode,
+  createPrompter,
+  resolveToken,
+  runAppendInstructionLine,
+  runRemoveInstructionLine,
+} from './setup-shared.mjs'
 
-export const CODEX_AGENTS_LINE =
-  'After you change code that handles money, sign-in, user data or database migrations, and before the user commits it, offer a MegaLens review and wait for a yes before running it.'
+export const CODEX_AGENTS_LINE = MEGALENS_REVIEW_LINE
+export { TOKEN_REGEX, MASKED_TOKEN, hasMegaLensReviewLine as hasMegaLensAgentsLine }
 
 export const CODEX_MCP_URL = 'https://megalens.ai/api/mcp?ide=codex'
-export const TOKEN_REGEX = /^ml_tok_[0-9a-f]{32}$/i
-export const MASKED_TOKEN = 'ml_tok_****'
 export const FINAL_MESSAGE =
   'Restart Codex, then ask it to get a second opinion from MegaLens on your next change.'
 
@@ -37,12 +50,6 @@ export function hasTomlTable(text, table, { scanTomlLine, tomlHeaderPath }) {
     ;({ delim, depth } = scanTomlLine(line, delim, depth))
   }
   return false
-}
-
-export function hasMegaLensAgentsLine(text) {
-  return text
-    .split(/\r?\n/)
-    .some((line) => line.trim() === CODEX_AGENTS_LINE || /offer a MegaLens review/i.test(line))
 }
 
 function maskSecretsInToml(text) {
@@ -505,256 +512,6 @@ function buildHttpHeadersReplacement(info, token, configEol) {
   }
 }
 
-async function getReadOnlyReason(filePath) {
-  const target = await realpath(filePath).catch(() => filePath)
-  const st = await stat(target).catch(() => null)
-  if (!st) return null
-  const mode = st.mode & 0o777
-  if ((mode & 0o222) === 0) {
-    return `mode 0${mode.toString(8)}`
-  }
-  try {
-    await access(target, constants.W_OK)
-    return null
-  } catch (err) {
-    if (err?.code === 'EACCES' || err?.code === 'EROFS' || err?.code === 'EPERM') {
-      return err.code
-    }
-    return null
-  }
-}
-
-function makeTimestamp(now = new Date()) {
-  return now.toISOString().replace(/[:.]/g, '-')
-}
-
-function isYes(answer) {
-  const normalized = String(answer ?? '').trim().toLowerCase()
-  return normalized === 'y' || normalized === 'yes'
-}
-
-const utf8FatalDecoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
-
-async function readOptionalFile(filePath) {
-  try {
-    const buf = await readFile(filePath)
-    const content = utf8FatalDecoder.decode(buf)
-    return { exists: true, content, unreadable: null }
-  } catch (err) {
-    if (err?.code === 'ENOENT') return { exists: false, content: '', unreadable: null }
-    return { exists: true, content: '', unreadable: String(err?.message ?? err) }
-  }
-}
-
-async function backupExistingFile(targetPath, timestamp) {
-  const backupPath = `${targetPath}.bak-${timestamp}`
-  const existingStat = await stat(targetPath)
-  await copyFile(targetPath, backupPath)
-  await chmod(backupPath, existingStat.mode & 0o777).catch(() => {})
-  return backupPath
-}
-
-async function writeFileAtomicPreservingMode(filePath, contents, { defaultMode, preserveMode = true, log }) {
-  const target = await realpath(filePath).catch(() => filePath)
-  await mkdir(dirname(target), { recursive: true })
-  const existing = await stat(target).catch(() => null)
-  const existingMode = existing ? (existing.mode & 0o777) : defaultMode
-  const targetMode = preserveMode ? existingMode : defaultMode
-  const tmp = `${target}.megalens-tmp.${process.pid}.${process.hrtime.bigint().toString(36)}`
-
-  if (existing && existing.nlink > 1) {
-    log(`\n  ! ${target} has other hard links. They will keep the previous contents.`)
-  }
-
-  try {
-    // Always create temp file with restrictive 0600 first so secrets are never briefly world-readable.
-    await writeFile(tmp, contents, { encoding: 'utf-8', mode: 0o600, flag: 'wx' })
-    try {
-      await chmod(tmp, targetMode)
-    } catch (err) {
-      if (!preserveMode && targetMode === 0o600) {
-        log(`  ! Warning: could not enforce 0600 permissions on ${filePath}: ${err?.message ?? err}`)
-      } else {
-        throw err
-      }
-    }
-    if (existing && typeof process.getuid === 'function') {
-      if (existing.uid !== process.getuid() || existing.gid !== process.getgid()) {
-        try {
-          await chown(tmp, existing.uid, existing.gid)
-        } catch {
-          log(`\n  ! Could not preserve ownership of ${target}; it will belong to the current user.`)
-        }
-      }
-    }
-    await rename(tmp, target)
-    if (!preserveMode && existing && (existingMode & 0o077) !== 0) {
-      log(`  Note: tightened ${filePath} permissions from 0${existingMode.toString(8)} to 0600.`)
-    }
-  } catch (err) {
-    await unlink(tmp).catch(() => {})
-    throw err
-  }
-}
-
-class UserAbortError extends Error {
-  constructor() {
-    super('Aborted by user')
-    this.name = 'UserAbortError'
-    this.exitCode = 130
-  }
-}
-
-async function discardPendingStdin(stdin) {
-  if (stdin.readableEnded || stdin.destroyed) return
-  while (stdin.read() !== null) {}
-  const hasRaw = typeof stdin.setRawMode === 'function' && stdin.isTTY
-  if (hasRaw) {
-    try { stdin.setRawMode(true) } catch {}
-  }
-  const onData = () => {}
-  stdin.on('data', onData)
-  stdin.resume()
-  await new Promise((r) => setTimeout(r, 25))
-  stdin.removeListener('data', onData)
-  stdin.pause()
-  while (stdin.read() !== null) {}
-  if (hasRaw) {
-    try { stdin.setRawMode(false) } catch {}
-  }
-}
-
-function createPrompter(stdin, stdout) {
-  async function askPlain(prompt) {
-    if (stdin.readableEnded || stdin.destroyed) {
-      return ''
-    }
-    await discardPendingStdin(stdin)
-    if (stdin.readableEnded || stdin.destroyed) {
-      return ''
-    }
-    const rl = createInterface({ input: stdin, output: stdout })
-    return new Promise((resolvePrompt, rejectPrompt) => {
-      let settled = false
-      const cleanup = () => {
-        stdin.removeListener('end', onEnd)
-        stdin.removeListener('data', onRawCheck)
-        rl.removeListener('SIGINT', onSigint)
-        process.removeListener('SIGINT', onSigint)
-      }
-      const finish = (value) => {
-        if (settled) return
-        settled = true
-        cleanup()
-        resolvePrompt(value)
-      }
-      const onSigint = () => {
-        if (settled) return
-        settled = true
-        cleanup()
-        stdout.write('\n')
-        try { rl.close() } catch {}
-        if (typeof stdin.pause === 'function') stdin.pause()
-        rejectPrompt(new UserAbortError())
-      }
-      const onRawCheck = (chunk) => {
-        if (String(chunk).includes('\x03')) {
-          onSigint()
-        }
-      }
-      const onEnd = () => {
-        finish('')
-        rl.close()
-      }
-      rl.once('SIGINT', onSigint)
-      process.once('SIGINT', onSigint)
-      rl.once('close', () => finish(''))
-      stdin.once('end', onEnd)
-      stdin.on('data', onRawCheck)
-      rl.question(prompt, (answer) => {
-        finish(answer.trim())
-        rl.close()
-      })
-    })
-  }
-
-  function askHidden(prompt) {
-    stdout.write(prompt)
-    if (stdin.readableEnded || stdin.destroyed) {
-      stdout.write('\n')
-      return Promise.reject(new Error('Aborted by user'))
-    }
-    return new Promise((resolvePrompt, rejectPrompt) => {
-      const hasRaw = typeof stdin.setRawMode === 'function' && stdin.isTTY
-      if (hasRaw) stdin.setRawMode(true)
-      stdin.resume()
-      let buf = ''
-      let settled = false
-
-      const cleanup = () => {
-        stdin.removeListener('data', onData)
-        stdin.removeListener('end', onEnd)
-        process.removeListener('SIGINT', onSigint)
-        if (hasRaw) {
-          try { stdin.setRawMode(false) } catch {}
-        }
-        stdin.pause()
-      }
-
-      const onSigint = () => {
-        if (settled) return
-        settled = true
-        cleanup()
-        stdout.write('\n')
-        rejectPrompt(new UserAbortError())
-      }
-
-      const onEnd = () => {
-        if (settled) return
-        settled = true
-        cleanup()
-        stdout.write('\n')
-        rejectPrompt(new Error('Aborted by user'))
-      }
-
-      const onData = (chunk) => {
-        const str = chunk.toString('utf-8')
-        for (const ch of str) {
-          if (ch === '\x03') {
-            onSigint()
-            return
-          }
-          if (ch === '\x04') {
-            onEnd()
-            return
-          }
-          if (ch === '\r' || ch === '\n') {
-            if (settled) return
-            settled = true
-            cleanup()
-            stdout.write('\n')
-            resolvePrompt(buf.trim())
-            return
-          }
-          if (ch === '\x7f' || ch === '\b') {
-            buf = buf.slice(0, -1)
-            continue
-          }
-          if (ch >= ' ') {
-            buf += ch
-          }
-        }
-      }
-
-      process.once('SIGINT', onSigint)
-      stdin.once('end', onEnd)
-      stdin.on('data', onData)
-    })
-  }
-
-  return { askPlain, askHidden }
-}
-
 function printNonInteractiveGuide({ configPath, agentsPath, log }) {
   log('\n  MegaLens Codex Setup (non-interactive mode: nothing was written)\n')
   log('  Manual steps:')
@@ -771,22 +528,26 @@ function printNonInteractiveGuide({ configPath, agentsPath, log }) {
 export function parseSetupCodexArgs(args) {
   let dryRun = false
   let replaceToken = false
+  let removeLine = false
   let help = false
 
   for (const arg of args) {
     if (arg === '--dry-run') dryRun = true
     else if (arg === '--replace-token') replaceToken = true
+    else if (arg === '--remove-line') removeLine = true
     else if (arg === '--help' || arg === '-h') help = true
     else if (arg === '--yes' || arg === '-y') {
       return { error: '--yes is not supported. Every write requires an explicit y at its own prompt.' }
-    } else if (arg.startsWith('-')) {
-      return { error: `Unknown option for setup codex: ${arg}` }
     } else {
-      return { error: `Unexpected argument for setup codex: ${arg}` }
+      return { error: formatInvalidSetupArgError('codex', arg) }
     }
   }
 
-  return { dryRun, replaceToken, help }
+  if (removeLine && replaceToken) {
+    return { error: 'Cannot combine --remove-line with --replace-token.' }
+  }
+
+  return { dryRun, replaceToken, removeLine, help }
 }
 
 export async function runSetupCodex(args = [], io = {}) {
@@ -818,6 +579,7 @@ export async function runSetupCodex(args = [], io = {}) {
 
   Options:
     --replace-token   Update the existing [mcp_servers.megalens] token in config.toml
+    --remove-line     Remove the MegaLens review line from AGENTS.md
     --dry-run         Show what would be written without changing any files
     -h, --help        Show this help
 `)
@@ -827,16 +589,29 @@ export async function runSetupCodex(args = [], io = {}) {
   const codexHome = resolveCodexHome(env, home)
   const configPath = join(codexHome, 'config.toml')
   const agentsPath = join(codexHome, 'AGENTS.md')
+  const prompter = promptOverride ?? createPrompter(stdin, stdout)
+  const timestamp = makeTimestamp(now())
+
+  if (parsed.removeLine) {
+    return runRemoveInstructionLine({
+      filePath: agentsPath,
+      hostName: 'Codex',
+      dryRun: parsed.dryRun,
+      isTTY,
+      prompter,
+      timestamp,
+      log,
+      errLog,
+    })
+  }
 
   if (!isTTY) {
     printNonInteractiveGuide({ configPath, agentsPath, log })
     return { exitCode: 0, written: [], dryRun: parsed.dryRun }
   }
 
-  const prompter = promptOverride ?? createPrompter(stdin, stdout)
   const written = []
   const dryRunNotes = []
-  const timestamp = makeTimestamp(now())
 
   log('\n  MegaLens Codex Setup\n')
   if (parsed.dryRun) {
@@ -877,21 +652,11 @@ export async function runSetupCodex(args = [], io = {}) {
           log(`  ! ${configPath} is read-only (${readOnlyReason}).`)
           log('    Refusing to replace it; leaving config.toml unchanged.\n')
         } else {
-          const envToken = typeof env.MEGALENS_TOKEN === 'string' ? env.MEGALENS_TOKEN.trim() : ''
-          let token = envToken
-          if (!token) {
-            try {
-              token = await prompter.askHidden('  Enter your MegaLens token (ml_tok_...): ')
-            } catch (err) {
-              return { exitCode: err?.exitCode === 130 ? 130 : 1, written, dryRun: parsed.dryRun }
-            }
+          const tokenRes = await resolveToken({ env, prompter, errLog })
+          if (!tokenRes.token) {
+            return { exitCode: tokenRes.exitCode, written, dryRun: parsed.dryRun }
           }
-
-          if (!TOKEN_REGEX.test(token)) {
-            errLog('  Invalid token format. Expected ml_tok_ followed by 32 hex characters.')
-            errLog('  Get your token at https://megalens.ai/app/settings/mcp\n')
-            return { exitCode: 1, written, dryRun: parsed.dryRun }
-          }
+          const token = tokenRes.token
 
           const defaultEol = platform === 'win32' ? '\r\n' : '\n'
           const configEol = configRead.exists && existingConfig.length > 0
@@ -982,69 +747,20 @@ export async function runSetupCodex(args = [], io = {}) {
     log(`  Note: ${agentsOverridePath} exists; Codex may prefer it over AGENTS.md.`)
   }
 
-  const agentsRead = await readOptionalFile(agentsPath)
-  if (agentsRead.unreadable) {
-    errLog(`  ! ${agentsPath} could not be read: ${agentsRead.unreadable}`)
-    errLog('    Leaving AGENTS.md untouched.')
-  } else if (agentsRead.exists && hasMegaLensAgentsLine(agentsRead.content)) {
-    log(`  ${agentsPath} already has a MegaLens line. Leaving it unchanged.\n`)
-  } else {
-    const agentsReadOnlyReason = agentsRead.exists ? await getReadOnlyReason(agentsPath) : null
-    if (agentsReadOnlyReason) {
-      log(`  ! ${agentsPath} is read-only (${agentsReadOnlyReason}).`)
-      log('    Refusing to replace it; leaving AGENTS.md unchanged.\n')
-    } else {
-      log('  Proposed AGENTS.md line:')
-      log(`    ${CODEX_AGENTS_LINE}\n`)
-
-      let answer
-      try {
-        answer = await prompter.askPlain(
-          `  Add this line to ${agentsPath} so Codex offers a MegaLens review at the right moments? (y/n): `,
-        )
-      } catch (err) {
-        if (err?.exitCode === 130) {
-          return { exitCode: 130, written, dryRun: parsed.dryRun }
-        }
-        throw err
-      }
-
-      if (isYes(answer)) {
-        const defaultEol = platform === 'win32' ? '\r\n' : '\n'
-        const agentsEol = agentsRead.exists && agentsRead.content.length > 0
-          ? (agentsRead.content.includes('\r\n') ? '\r\n' : '\n')
-          : defaultEol
-        const base = !agentsRead.content
-          ? ''
-          : (agentsRead.content.endsWith('\n') ? agentsRead.content : `${agentsRead.content}${agentsEol}`)
-        const nextAgents = `${base}${CODEX_AGENTS_LINE}${agentsEol}`
-
-        if (parsed.dryRun) {
-          dryRunNotes.push(`${agentsPath} (would ${agentsRead.exists ? 'update' : 'create'})`)
-          log(`  [dry-run] Would write ${agentsPath}`)
-        } else {
-          try {
-            const target = await realpath(agentsPath).catch(() => agentsPath)
-            if (agentsRead.exists) {
-              await backupExistingFile(target, timestamp)
-            }
-            await writeFileAtomicPreservingMode(agentsPath, nextAgents, {
-              defaultMode: 0o644,
-              preserveMode: true,
-              log,
-            })
-            written.push(agentsPath)
-            log(`  Wrote ${agentsPath}`)
-          } catch (err) {
-            errLog(`  ! Failed to write ${agentsPath}: ${err?.message ?? err}`)
-            return { exitCode: 1, written, dryRun: parsed.dryRun }
-          }
-        }
-      } else {
-        log(`  Skipped ${agentsPath}.`)
-      }
-      log('')
-    }
+  const agentsRes = await runAppendInstructionLine({
+    filePath: agentsPath,
+    promptText: `  Add this line to ${agentsPath} so Codex offers a MegaLens review at the right moments? (y/n): `,
+    dryRun: parsed.dryRun,
+    prompter,
+    platform,
+    timestamp,
+    log,
+    errLog,
+    written,
+    dryRunNotes,
+  })
+  if (agentsRes.exitCode) {
+    return { exitCode: agentsRes.exitCode, written, dryRun: parsed.dryRun }
   }
 
   // ── 6. Final message ──

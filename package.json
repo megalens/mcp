@@ -1,6 +1,6 @@
 {
   "name": "megalens-mcp",
-  "version": "0.3.7",
+  "version": "0.3.8",
   "description": "MegaLens setup wizard: connects your IDE to the hosted MegaLens MCP server.",
   "license": "MIT",
   "author": "MegaLens.ai <hello@megalens.ai>",
@@ -29,7 +29,7 @@
   },
   "type": "module",
   "scripts": {
-    "test": "node test/atomic-write-cases.mjs && node test/toml-cases.mjs && node test/codex-setup-cases.mjs"
+    "test": "node test/atomic-write-cases.mjs && node test/toml-cases.mjs && node test/codex-setup-cases.mjs && node test/host-setup-cases.mjs"
   },
   "files": [
     "bin/",
