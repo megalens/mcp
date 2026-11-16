@@ -5,6 +5,7 @@
  *
  * Usage:
  *   megalens-mcp setup           Interactive setup: detect tool, write config
+ *   megalens-mcp setup codex     Interactive Codex setup (config.toml + AGENTS.md)
  *   megalens-mcp validate        Test your token connectivity
  *   megalens-mcp config          Show current config location + status
  */
@@ -13,6 +14,7 @@ import { readFile, writeFile, access, mkdir, chmod, rename, unlink, realpath, st
 import { join } from 'path'
 import { homedir } from 'os'
 import { createInterface } from 'readline'
+import { runSetupCodex } from './codex-setup.mjs'
 
 const API_BASE = 'https://megalens.ai'
 const MCP_URL = `${API_BASE}/api/mcp`
@@ -529,6 +531,9 @@ async function cmdSetup() {
     console.log('  Supported: Claude Code, Codex CLI, Cursor, Gemini CLI and Lovable. GitHub Copilot is coming soon.')
     console.log('  Lovable needs no config file: paste the server URL and your token into its MCP connector form.')
     console.log('  Lovable steps: https://megalens.ai/integrations/lovable')
+    console.log('  ChatGPT, Claude.ai and other OAuth connectors need no wizard and no token: add')
+    console.log('  https://megalens.ai/api/mcp as a connector, then sign in and approve.')
+    console.log('  Steps: https://megalens.ai/integrations/oauth-connectors')
     console.log('  Manual setup: https://megalens.ai/integrations\n')
 
     const choices = TOOLS.map((t, i) => `    ${i + 1}. ${t.label ?? t.name}`).join('\n')
@@ -638,7 +643,14 @@ const cmd = process.argv[2] || 'setup'
 
 switch (cmd) {
   case 'setup':
-    await cmdSetup()
+    if (process.argv[3] === 'codex') {
+      const result = await runSetupCodex(process.argv.slice(4), {
+        tomlHelpers: { scanTomlLine, tomlHeaderPath, stripTomlTable },
+      })
+      if (result.exitCode) process.exitCode = result.exitCode
+    } else {
+      await cmdSetup()
+    }
     break
   case 'validate':
     await cmdValidate()
@@ -653,10 +665,11 @@ switch (cmd) {
   Usage: megalens-mcp <command>
 
   Commands:
-    setup      Interactive setup — detect tools, write config
-    validate   Test your token connectivity
-    config     Show current config locations + status
-    help       Show this help
+    setup         Interactive setup: detect tools, write config
+    setup codex   Interactive Codex setup (config.toml + AGENTS.md)
+    validate      Test your token connectivity
+    config        Show current config locations + status
+    help          Show this help
 `)
     break
   default:
