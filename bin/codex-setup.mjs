@@ -4,12 +4,14 @@ import { homedir } from 'node:os'
 import {
   MEGALENS_REVIEW_LINE,
   DECISION_LINE,
+  DECISION_LINE_V1,
   MEGALENS_INSTRUCTION_LINES,
   TOKEN_REGEX,
   MASKED_TOKEN,
   formatInvalidSetupArgError,
   hasMegaLensReviewLine,
   hasMegaLensDecisionLine,
+  hasMegaLensDecisionV1Line,
   getMissingInstructionLines,
   getReadOnlyReason,
   makeTimestamp,
@@ -28,9 +30,11 @@ export {
   TOKEN_REGEX,
   MASKED_TOKEN,
   DECISION_LINE,
+  DECISION_LINE_V1,
   MEGALENS_INSTRUCTION_LINES,
   hasMegaLensReviewLine as hasMegaLensAgentsLine,
   hasMegaLensDecisionLine,
+  hasMegaLensDecisionV1Line,
   getMissingInstructionLines,
 }
 
@@ -762,8 +766,19 @@ export async function runSetupCodex(args = [], io = {}) {
 
   const agentsRes = await runAppendInstructionLines({
     filePath: agentsPath,
-    promptText: (missing) =>
-      `  Add ${missing.length > 1 ? 'these lines' : 'this line'} to ${agentsPath} so Codex offers a MegaLens review at the right moments? (y/N): `,
+    promptText: (plan) => {
+      const onlyAdds = plan.replacements.length === 0 && plan.removals.length === 0
+      if (onlyAdds) {
+        return `  Add ${plan.addLines.length > 1 ? 'these lines' : 'this line'} to ${agentsPath} so Codex offers a MegaLens review at the right moments? (y/N): `
+      }
+      if (plan.addLines.length === 0 && plan.removals.length === 0 && plan.replacements.length === 1) {
+        return `  Update this line in ${agentsPath} so Codex offers a MegaLens review at the right moments? (y/N): `
+      }
+      if (plan.addLines.length === 0 && plan.replacements.length === 0) {
+        return `  Remove outdated MegaLens ${plan.removals.length > 1 ? 'lines' : 'line'} from ${agentsPath}? (y/N): `
+      }
+      return `  Apply these updates to ${agentsPath} so Codex offers a MegaLens review at the right moments? (y/N): `
+    },
     dryRun: parsed.dryRun,
     prompter,
     platform,

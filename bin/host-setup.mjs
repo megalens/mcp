@@ -6,6 +6,7 @@ import { homedir } from 'node:os'
 import {
   MEGALENS_REVIEW_LINE,
   DECISION_LINE,
+  DECISION_LINE_V1,
   MEGALENS_INSTRUCTION_LINES,
   TOKEN_REGEX,
   MASKED_TOKEN,
@@ -23,6 +24,7 @@ import {
 export {
   MEGALENS_REVIEW_LINE,
   DECISION_LINE,
+  DECISION_LINE_V1,
   MEGALENS_INSTRUCTION_LINES,
   TOKEN_REGEX,
   MASKED_TOKEN,
@@ -535,15 +537,26 @@ async function runSetupHost(spec, args = [], io = {}) {
   }
 
   // ── 3. Global instruction file ──
-  const promptText = (missing) => {
-    const noun = missing.length > 1 ? 'these lines' : 'this line'
-    if (spec.instructionsNote) {
-      const note = missing.length > 1
-        ? spec.instructionsNote
-        : spec.instructionsNoteSingle ?? spec.instructionsNote
-      return `  Add ${noun} to ${instructionsPath} so ${spec.displayName} offers a MegaLens review at the right moments? ${note} (y/N): `
+  const promptText = (plan) => {
+    const onlyAdds = plan.replacements.length === 0 && plan.removals.length === 0
+    const totalChanges = plan.addLines.length + plan.replacements.length + plan.removals.length
+    const note = spec.instructionsNote
+      ? (totalChanges > 1 ? spec.instructionsNote : (spec.instructionsNoteSingle ?? spec.instructionsNote))
+      : ''
+    const noteSuffix = note ? ` ${note}` : ''
+
+    if (onlyAdds) {
+      const noun = plan.addLines.length > 1 ? 'these lines' : 'this line'
+      return `  Add ${noun} to ${instructionsPath} so ${spec.displayName} offers a MegaLens review at the right moments?${noteSuffix} (y/N): `
     }
-    return `  Add ${noun} to ${instructionsPath} so ${spec.displayName} offers a MegaLens review at the right moments? (y/N): `
+    if (plan.addLines.length === 0 && plan.removals.length === 0 && plan.replacements.length === 1) {
+      return `  Update this line in ${instructionsPath} so ${spec.displayName} offers a MegaLens review at the right moments?${noteSuffix} (y/N): `
+    }
+    if (plan.addLines.length === 0 && plan.replacements.length === 0) {
+      const noun = plan.removals.length > 1 ? 'lines' : 'line'
+      return `  Remove outdated MegaLens ${noun} from ${instructionsPath}?${noteSuffix} (y/N): `
+    }
+    return `  Apply these updates to ${instructionsPath} so ${spec.displayName} offers a MegaLens review at the right moments?${noteSuffix} (y/N): `
   }
 
   const instRes = await runAppendInstructionLines({

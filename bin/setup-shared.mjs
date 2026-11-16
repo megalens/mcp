@@ -7,16 +7,27 @@ export const MEGALENS_REVIEW_LINE =
   'After you change code that handles money, sign-in, user data or database migrations, and before the user commits it, offer a MegaLens review and wait for a yes before running it.'
 
 export const DECISION_LINE =
+  'Before you or the user settle a decision that is hard to undo (choosing a database or data model, adding sign-in or payments, picking a major library or architecture), starting a new project, or doing deep research, offer a MegaLens review once for that task and wait for a yes before running it. Do not offer it for small questions or routine edits.'
+
+export const DECISION_LINE_V1 =
   'When the user is making a decision that is hard to undo (a data model, architecture, security, a major dependency), starting a new project, or asking for deep research, offer a MegaLens review once for that task and wait for a yes before running it. Do not offer it for small questions or routine edits.'
 
 export const MEGALENS_INSTRUCTION_LINES = [MEGALENS_REVIEW_LINE, DECISION_LINE]
+export const REMOVABLE_INSTRUCTION_LINES = [MEGALENS_REVIEW_LINE, DECISION_LINE, DECISION_LINE_V1]
 
 export const TOKEN_REGEX = /^ml_tok_[0-9a-f]{32}$/i
 export const MASKED_TOKEN = 'ml_tok_****'
 
 const OLD_LINE_PATTERN = /after you change code.*offer a MegaLens review/i
 const OFFER_REVIEW_PATTERN = /offer a MegaLens review/i
-const DECISION_LINE_PATTERN = /decision that is hard to undo.*MegaLens/i
+const DECISION_V1_PATTERN = /when the user is making a decision that is hard to undo.*MegaLens/i
+const DECISION_V1_SPAN_PATTERN =
+  /when the user is making a decision that is hard to undo.*MegaLens(?:\s+reviews?)?(?:\s+once for that task[^.!?\n]*[.!?]?)?(?:\s*Do not offer it for small questions or routine edits[.!?]?)?/i
+const DECISION_V2_PATTERN = /before you or the user settle a decision.*MegaLens/i
+const DECISION_CONTINUATION_PATTERN = /once for that task|small questions or routine edits|hard to undo/i
+const BULLET_QUOTE_WS_ONLY = /^[\s\-*+>"'`“”‘’•]*$/
+const BULLET_QUOTE_WS_PUNCT_ONLY = /^[\s\-*+>"'`“”‘’•.,;:!?]*$/
+const V1_LEADING_PREFIX_PATTERN = /^(\s*(?:(?:[-*+>]\s+)|["'`“‘])*)/
 
 const utf8FatalDecoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
 
@@ -26,26 +37,43 @@ function normalizeLineForMatch(raw, idx) {
   return noBom.trim()
 }
 
+function isV1DecisionLine(trimmed) {
+  return trimmed === DECISION_LINE_V1 || DECISION_V1_PATTERN.test(trimmed)
+}
+
+function isV2DecisionLine(trimmed) {
+  return trimmed === DECISION_LINE || DECISION_V2_PATTERN.test(trimmed)
+}
+
+function isCodeReviewLine(trimmed) {
+  return (
+    trimmed === MEGALENS_REVIEW_LINE ||
+    OLD_LINE_PATTERN.test(trimmed) ||
+    (
+      OFFER_REVIEW_PATTERN.test(trimmed) &&
+      !isV1DecisionLine(trimmed) &&
+      !isV2DecisionLine(trimmed) &&
+      !DECISION_CONTINUATION_PATTERN.test(trimmed)
+    )
+  )
+}
+
 export function hasMegaLensReviewLine(text) {
   return text
     .split('\n')
-    .some((raw, idx) => {
-      const trimmed = normalizeLineForMatch(raw, idx)
-      return (
-        trimmed === MEGALENS_REVIEW_LINE ||
-        OLD_LINE_PATTERN.test(trimmed) ||
-        (OFFER_REVIEW_PATTERN.test(trimmed) && !DECISION_LINE_PATTERN.test(trimmed))
-      )
-    })
+    .some((raw, idx) => isCodeReviewLine(normalizeLineForMatch(raw, idx)))
 }
 
 export function hasMegaLensDecisionLine(text) {
   return text
     .split('\n')
-    .some((raw, idx) => {
-      const trimmed = normalizeLineForMatch(raw, idx)
-      return trimmed === DECISION_LINE || DECISION_LINE_PATTERN.test(trimmed)
-    })
+    .some((raw, idx) => isV2DecisionLine(normalizeLineForMatch(raw, idx)))
+}
+
+export function hasMegaLensDecisionV1Line(text) {
+  return text
+    .split('\n')
+    .some((raw, idx) => isV1DecisionLine(normalizeLineForMatch(raw, idx)))
 }
 
 export function getMissingInstructionLines(text) {
@@ -363,7 +391,7 @@ export async function resolveToken({ env, prompter, errLog }) {
   return { token, exitCode: 0 }
 }
 
-export function removeExactInstructionLines(content, exactLines = MEGALENS_INSTRUCTION_LINES) {
+export function removeExactInstructionLines(content, exactLines = REMOVABLE_INSTRUCTION_LINES) {
   const targets = Array.isArray(exactLines) ? exactLines : [exactLines]
   const targetSet = new Set(targets)
   const lines = content.split('\n')
@@ -400,6 +428,133 @@ export function removeExactInstructionLines(content, exactLines = MEGALENS_INSTR
 
 export const removeExactInstructionLine = removeExactInstructionLines
 
+function joinAfterCut(prefix, suffix) {
+  if (!suffix.trim()) {
+    return prefix.replace(/[ \t]+$/, '')
+  }
+  if (!prefix.trim() || (/[ \t]$/.test(prefix) && /^[ \t]/.test(suffix))) {
+    return `${prefix}${suffix.replace(/^[ \t]+/, '')}`
+  }
+  return `${prefix}${suffix}`
+}
+
+export function planInstructionLineUpdates(content, { exists = true, platform = process.platform } = {}) {
+  const defaultEol = platform === 'win32' ? '\r\n' : '\n'
+  const eol = exists && content.length > 0
+    ? (content.includes('\r\n') ? '\r\n' : '\n')
+    : defaultEol
+
+  if (!exists || content.length === 0) {
+    const addLines = [...MEGALENS_INSTRUCTION_LINES]
+    return {
+      hasChanges: true,
+      addLines,
+      replacements: [],
+      removals: [],
+      nextContent: `${addLines.join(eol)}${eol}`,
+    }
+  }
+
+  const hasV2 = hasMegaLensDecisionLine(content)
+
+  const lines = content.split('\n')
+  const nextLines = []
+  const replacements = []
+  const removals = []
+  let replacedFirstV1 = false
+  let removedBom = false
+
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i]
+    const hadCr = raw.endsWith('\r')
+    const noCr = hadCr ? raw.slice(0, -1) : raw
+    const hasBom = i === 0 && noCr.startsWith('\uFEFF')
+    const noBom = hasBom ? noCr.slice(1) : noCr
+    const trimmed = noBom.trim()
+
+    const exactIdx = noBom.indexOf(DECISION_LINE_V1)
+    if (exactIdx !== -1) {
+      if (!hasV2 && !replacedFirstV1) {
+        replacedFirstV1 = true
+        const updated =
+          noBom.slice(0, exactIdx) +
+          DECISION_LINE +
+          noBom.slice(exactIdx + DECISION_LINE_V1.length)
+        nextLines.push(`${hasBom ? '\uFEFF' : ''}${updated}${hadCr ? '\r' : ''}`)
+        replacements.push({ from: DECISION_LINE_V1, to: DECISION_LINE })
+      } else {
+        let remainder = noBom
+        while (remainder.includes(DECISION_LINE_V1)) {
+          const idx = remainder.indexOf(DECISION_LINE_V1)
+          remainder = joinAfterCut(
+            remainder.slice(0, idx),
+            remainder.slice(idx + DECISION_LINE_V1.length),
+          )
+        }
+        removals.push(DECISION_LINE_V1)
+        if (BULLET_QUOTE_WS_ONLY.test(remainder)) {
+          if (hasBom) removedBom = true
+        } else {
+          nextLines.push(`${hasBom ? '\uFEFF' : ''}${remainder}${hadCr ? '\r' : ''}`)
+        }
+      }
+      continue
+    }
+
+    if (isV1DecisionLine(trimmed)) {
+      if (!hasV2 && !replacedFirstV1) {
+        replacedFirstV1 = true
+        const prefix = (noBom.match(V1_LEADING_PREFIX_PATTERN) || ['', ''])[1]
+        nextLines.push(`${hasBom ? '\uFEFF' : ''}${prefix}${DECISION_LINE}${hadCr ? '\r' : ''}`)
+        replacements.push({ from: trimmed, to: DECISION_LINE })
+        continue
+      }
+
+      const spanMatch = noBom.match(DECISION_V1_SPAN_PATTERN)
+      if (spanMatch) {
+        const idx = spanMatch.index ?? 0
+        const remainder = joinAfterCut(
+          noBom.slice(0, idx),
+          noBom.slice(idx + spanMatch[0].length),
+        )
+        if (BULLET_QUOTE_WS_PUNCT_ONLY.test(remainder)) {
+          if (hasBom) removedBom = true
+          removals.push(trimmed)
+          continue
+        }
+      }
+    }
+
+    nextLines.push(raw)
+  }
+
+  let intermediate = nextLines.join('\n')
+  if (removedBom && intermediate.length > 0 && !intermediate.startsWith('\uFEFF')) {
+    intermediate = `\uFEFF${intermediate}`
+  }
+
+  const addLines = []
+  if (!hasMegaLensReviewLine(intermediate)) addLines.push(MEGALENS_REVIEW_LINE)
+  if (!hasMegaLensDecisionLine(intermediate)) addLines.push(DECISION_LINE)
+
+  const hasChanges = addLines.length > 0 || replacements.length > 0 || removals.length > 0
+  let nextContent = intermediate
+  if (addLines.length > 0) {
+    const base = !intermediate
+      ? ''
+      : (intermediate.endsWith('\n') ? intermediate : `${intermediate}${eol}`)
+    nextContent = `${base}${addLines.join(eol)}${eol}`
+  }
+
+  return {
+    hasChanges,
+    addLines,
+    replacements,
+    removals,
+    nextContent,
+  }
+}
+
 export async function runAppendInstructionLines({
   filePath,
   promptText,
@@ -420,11 +575,9 @@ export async function runAppendInstructionLines({
     return { exitCode: 0 }
   }
 
-  const missingLines = read.exists
-    ? getMissingInstructionLines(read.content)
-    : [...MEGALENS_INSTRUCTION_LINES]
+  const plan = planInstructionLineUpdates(read.content, { exists: read.exists, platform })
 
-  if (missingLines.length === 0) {
+  if (!plan.hasChanges) {
     log(`  ${filePath} already has the MegaLens lines. Leaving it unchanged.\n`)
     return { exitCode: 0 }
   }
@@ -436,14 +589,28 @@ export async function runAppendInstructionLines({
     return { exitCode: 0 }
   }
 
-  const plural = missingLines.length > 1
-  log(`  Proposed ${fileLabel} ${plural ? 'lines' : 'line'} (${filePath}):`)
-  for (const line of missingLines) {
-    log(`    ${line}`)
+  if (plan.replacements.length === 0 && plan.removals.length === 0) {
+    const plural = plan.addLines.length > 1
+    log(`  Proposed ${fileLabel} ${plural ? 'lines' : 'line'} (${filePath}):`)
+    for (const line of plan.addLines) {
+      log(`    ${line}`)
+    }
+  } else {
+    const totalChanges = plan.addLines.length + plan.replacements.length + plan.removals.length
+    log(`  Proposed ${fileLabel} ${totalChanges > 1 ? 'changes' : 'change'} (${filePath}):`)
+    for (const line of plan.addLines) {
+      log(`    Add this line: ${line}`)
+    }
+    for (const rep of plan.replacements) {
+      log(`    Update this line: ${rep.from} -> ${rep.to}`)
+    }
+    for (const rem of plan.removals) {
+      log(`    Remove outdated line: ${rem}`)
+    }
   }
   log('')
 
-  const resolvedPrompt = typeof promptText === 'function' ? promptText(missingLines) : promptText
+  const resolvedPrompt = typeof promptText === 'function' ? promptText(plan) : promptText
   let answer
   try {
     answer = await prompter.askPlain(resolvedPrompt)
@@ -459,15 +626,6 @@ export async function runAppendInstructionLines({
     return { exitCode: 0 }
   }
 
-  const defaultEol = platform === 'win32' ? '\r\n' : '\n'
-  const eol = read.exists && read.content.length > 0
-    ? (read.content.includes('\r\n') ? '\r\n' : '\n')
-    : defaultEol
-  const base = !read.content
-    ? ''
-    : (read.content.endsWith('\n') ? read.content : `${read.content}${eol}`)
-  const nextContent = `${base}${missingLines.join(eol)}${eol}`
-
   if (dryRun) {
     dryRunNotes.push(`${filePath} (would ${read.exists ? 'update' : 'create'})`)
     log(`  [dry-run] Would write ${filePath}\n`)
@@ -479,7 +637,7 @@ export async function runAppendInstructionLines({
     if (read.exists) {
       await backupExistingFile(target, timestamp)
     }
-    await writeFileAtomicPreservingMode(filePath, nextContent, {
+    await writeFileAtomicPreservingMode(filePath, plan.nextContent, {
       defaultMode: 0o644,
       preserveMode: true,
       log,
@@ -498,7 +656,7 @@ export const runAppendInstructionLine = runAppendInstructionLines
 export async function runRemoveInstructionLine({
   filePath,
   hostName,
-  lines = MEGALENS_INSTRUCTION_LINES,
+  lines = REMOVABLE_INSTRUCTION_LINES,
   dryRun = false,
   isTTY,
   prompter,

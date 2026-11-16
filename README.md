@@ -189,9 +189,9 @@ npx megalens-mcp setup codex [--replace-token] [--remove-line] [--dry-run] [-h|-
 What it writes:
 
 - `$CODEX_HOME/config.toml`: adds `[mcp_servers.megalens]` with `url = "https://megalens.ai/api/mcp?ide=codex"` and `http_headers = { "Authorization" = "Bearer <token>" }` (or updates `http_headers` with `--replace-token`). Writes atomically with `0600` permissions (tightening existing `config.toml` files to `0600` when the token is written) and saves a `.bak-*` backup before editing an existing file.
-- `$CODEX_HOME/AGENTS.md`: appends the two missing MegaLens instruction lines:
+- `$CODEX_HOME/AGENTS.md`: adds any missing MegaLens instruction line and updates an older version of the second line in place (after the same yes):
   - `After you change code that handles money, sign-in, user data or database migrations, and before the user commits it, offer a MegaLens review and wait for a yes before running it.`
-  - `When the user is making a decision that is hard to undo (a data model, architecture, security, a major dependency), starting a new project, or asking for deep research, offer a MegaLens review once for that task and wait for a yes before running it. Do not offer it for small questions or routine edits.`
+  - `Before you or the user settle a decision that is hard to undo (choosing a database or data model, adding sign-in or payments, picking a major library or architecture), starting a new project, or doing deep research, offer a MegaLens review once for that task and wait for a yes before running it. Do not offer it for small questions or routine edits.`
   Saves a `.bak-*` backup before editing an existing file. If `$CODEX_HOME/AGENTS.override.md` exists, prints a note that Codex may prefer it.
 
 Consent:

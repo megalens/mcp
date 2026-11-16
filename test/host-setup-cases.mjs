@@ -11,11 +11,13 @@ import { spawnSync } from 'node:child_process'
 import {
   MEGALENS_REVIEW_LINE,
   DECISION_LINE,
+  DECISION_LINE_V1,
   CLAUDE_DOCS_URL,
   ANTIGRAVITY_DOCS_URL,
   CLAUDE_FINAL_MESSAGE,
   ANTIGRAVITY_FINAL_MESSAGE,
   GEMINI_CLI_SHARED_NOTE,
+  GEMINI_CLI_SHARED_NOTE_SINGLE,
   runSetupClaudeCode,
   runSetupAntigravity,
 } from '../bin/host-setup.mjs'
@@ -1566,6 +1568,198 @@ async function readStubCalls(stubLog) {
     (await readFile(md7, 'utf-8')) === `${newOnly7}${MEGALENS_REVIEW_LINE}\n` &&
     o7.text().includes(MEGALENS_REVIEW_LINE) &&
     !o7.text().includes('Add these lines'))
+}
+
+// ── 21. Decision line v2 migration, hard-wrap guard & --remove-line (0.3.10) ─
+{
+  const hasLoneLf = (s) => /[^\r]\n/.test(s) || s.startsWith('\n')
+
+  for (const [hostLabel, fn, relDir, fileName, useCustomClaudeDir] of [
+    ['claude-code (CLAUDE_CONFIG_DIR)', runSetupClaudeCode, 'custom-claude', 'CLAUDE.md', true],
+    ['antigravity', runSetupAntigravity, '.gemini', 'GEMINI.md', false],
+  ]) {
+    // 1) CODE + v1 (CRLF) -> replaces v1 in place with v2, keeps CODE/position/CRLF, agy keeps Gemini CLI sentence
+    const { dir: d1, home: h1, env: e1 } = await newCaseEnv(useCustomClaudeDir ? 'claude' : 'agy', { MEGALENS_TOKEN: TOKEN_A })
+    const targetDir1 = useCustomClaudeDir ? join(d1, relDir) : join(h1, relDir)
+    const runEnv1 = useCustomClaudeDir ? { ...e1, CLAUDE_CONFIG_DIR: targetDir1 } : e1
+    await mkdir(targetDir1, { recursive: true })
+    const fp1 = join(targetDir1, fileName)
+    const init1 = `# Top\r\n${MEGALENS_REVIEW_LINE}\r\n# Mid\r\n${DECISION_LINE_V1}\r\n# Bottom\r\n`
+    await writeFile(fp1, init1)
+    const o1 = makeCaptureStream()
+    const p1 = makePromptScript(['n', 'y'])
+    const r1 = await fn([], {
+      stdout: o1.stream,
+      stderr: makeCaptureStream().stream,
+      env: runEnv1,
+      home: h1,
+      isTTY: true,
+      promptOverride: p1.promptOverride,
+      now: () => new Date('2026-11-16T12:20:00.000Z'),
+    })
+    const after1 = await readFile(fp1, 'utf-8')
+    const expected1 = `# Top\r\n${MEGALENS_REVIEW_LINE}\r\n# Mid\r\n${DECISION_LINE}\r\n# Bottom\r\n`
+    const hasGeminiNote1 = useCustomClaudeDir || p1.prompts.some((p) => p.prompt.includes(GEMINI_CLI_SHARED_NOTE_SINGLE))
+    check(`${hostLabel} CODE+v1 (CRLF) -> replaces v1 in place with v2, keeps CODE/position/CRLF`,
+      r1.exitCode === 0 &&
+      after1 === expected1 &&
+      !hasLoneLf(after1) &&
+      o1.text().includes(`Update this line: ${DECISION_LINE_V1} -> ${DECISION_LINE}`) &&
+      hasGeminiNote1 &&
+      (await readdir(targetDir1)).some((f) => f.startsWith(`${fileName}.bak-`)))
+
+    // 2) CODE + v2 -> unchanged, 0 backups added
+    const o2 = makeCaptureStream()
+    const p2 = makePromptScript(['n'])
+    const r2 = await fn([], {
+      stdout: o2.stream,
+      stderr: makeCaptureStream().stream,
+      env: runEnv1,
+      home: h1,
+      isTTY: true,
+      promptOverride: p2.promptOverride,
+    })
+    check(`${hostLabel} CODE+v2 -> unchanged, no prompt`,
+      r2.exitCode === 0 &&
+      p2.prompts.length === 1 &&
+      (await readFile(fp1, 'utf-8')) === expected1 &&
+      o2.text().includes('already has the MegaLens lines. Leaving it unchanged.'))
+
+    // 3) v1 only -> CODE added + v1 replaced in place in 1 prompt
+    const { dir: d3, home: h3, env: e3 } = await newCaseEnv(useCustomClaudeDir ? 'claude' : 'agy', { MEGALENS_TOKEN: TOKEN_A })
+    const targetDir3 = useCustomClaudeDir ? join(d3, relDir) : join(h3, relDir)
+    const runEnv3 = useCustomClaudeDir ? { ...e3, CLAUDE_CONFIG_DIR: targetDir3 } : e3
+    await mkdir(targetDir3, { recursive: true })
+    const fp3 = join(targetDir3, fileName)
+    await writeFile(fp3, `# Top\n${DECISION_LINE_V1}\n# Bottom\n`)
+    const o3 = makeCaptureStream()
+    const p3 = makePromptScript(['n', 'y'])
+    const r3 = await fn([], {
+      stdout: o3.stream,
+      stderr: makeCaptureStream().stream,
+      env: runEnv3,
+      home: h3,
+      isTTY: true,
+      promptOverride: p3.promptOverride,
+      now: () => new Date('2026-11-16T12:21:00.000Z'),
+    })
+    const hasGeminiNote3 = useCustomClaudeDir || p3.prompts.some((p) => p.prompt.includes(GEMINI_CLI_SHARED_NOTE))
+    check(`${hostLabel} v1 only -> adds CODE and replaces v1 in place in 1 prompt`,
+      r3.exitCode === 0 &&
+      p3.prompts.length === 2 &&
+      (await readFile(fp3, 'utf-8')) === `# Top\n${DECISION_LINE}\n# Bottom\n${MEGALENS_REVIEW_LINE}\n` &&
+      o3.text().includes(`Update this line: ${DECISION_LINE_V1} -> ${DECISION_LINE}`) &&
+      o3.text().includes(MEGALENS_REVIEW_LINE) &&
+      hasGeminiNote3)
+
+    // 4) v1 + v2 (+ CODE) -> removes v1, keeps v2 and CODE
+    const { dir: d4, home: h4, env: e4 } = await newCaseEnv(useCustomClaudeDir ? 'claude' : 'agy', { MEGALENS_TOKEN: TOKEN_A })
+    const targetDir4 = useCustomClaudeDir ? join(d4, relDir) : join(h4, relDir)
+    const runEnv4 = useCustomClaudeDir ? { ...e4, CLAUDE_CONFIG_DIR: targetDir4 } : e4
+    await mkdir(targetDir4, { recursive: true })
+    const fp4 = join(targetDir4, fileName)
+    await writeFile(fp4, `# Top\n${MEGALENS_REVIEW_LINE}\n${DECISION_LINE}\n${DECISION_LINE_V1}\n# Bottom\n`)
+    const o4 = makeCaptureStream()
+    const p4 = makePromptScript(['n', 'y'])
+    const r4 = await fn([], {
+      stdout: o4.stream,
+      stderr: makeCaptureStream().stream,
+      env: runEnv4,
+      home: h4,
+      isTTY: true,
+      promptOverride: p4.promptOverride,
+      now: () => new Date('2026-11-16T12:22:00.000Z'),
+    })
+    const hasGeminiNote4 = useCustomClaudeDir || p4.prompts.some((p) => p.prompt.includes(GEMINI_CLI_SHARED_NOTE_SINGLE))
+    check(`${hostLabel} v1+v2 -> removes v1 and keeps CODE+v2`,
+      r4.exitCode === 0 &&
+      (await readFile(fp4, 'utf-8')) === `# Top\n${MEGALENS_REVIEW_LINE}\n${DECISION_LINE}\n# Bottom\n` &&
+      o4.text().includes(DECISION_LINE_V1) &&
+      hasGeminiNote4)
+
+    // 5) Hard-wrapped v2 over two physical lines is NOT read as CODE line -> CODE added
+    const { dir: d5, home: h5, env: e5 } = await newCaseEnv(useCustomClaudeDir ? 'claude' : 'agy', { MEGALENS_TOKEN: TOKEN_A })
+    const targetDir5 = useCustomClaudeDir ? join(d5, relDir) : join(h5, relDir)
+    const runEnv5 = useCustomClaudeDir ? { ...e5, CLAUDE_CONFIG_DIR: targetDir5 } : e5
+    await mkdir(targetDir5, { recursive: true })
+    const fp5 = join(targetDir5, fileName)
+    const wrapped5 = [
+      '# Rules',
+      'Before you or the user settle a decision that is hard to undo (choosing a database or data model, adding sign-in or payments, picking a major library or architecture),',
+      'starting a new project, or doing deep research, offer a MegaLens review once for that task and wait for a yes before running it. Do not offer it for small questions or routine edits.',
+      '',
+    ].join('\n')
+    await writeFile(fp5, wrapped5)
+    const o5 = makeCaptureStream()
+    const p5 = makePromptScript(['n', 'y'])
+    const r5 = await fn([], {
+      stdout: o5.stream,
+      stderr: makeCaptureStream().stream,
+      env: runEnv5,
+      home: h5,
+      isTTY: true,
+      promptOverride: p5.promptOverride,
+      now: () => new Date('2026-11-16T12:23:00.000Z'),
+    })
+    check(`${hostLabel} hard-wrapped v2 is NOT read as CODE -> CODE added`,
+      r5.exitCode === 0 &&
+      (await readFile(fp5, 'utf-8')).includes(MEGALENS_REVIEW_LINE))
+
+    // 6) --dry-run on CODE+v1 writes nothing and creates no backup
+    const { dir: d6, home: h6, env: e6 } = await newCaseEnv(useCustomClaudeDir ? 'claude' : 'agy', { MEGALENS_TOKEN: TOKEN_A })
+    const targetDir6 = useCustomClaudeDir ? join(d6, relDir) : join(h6, relDir)
+    const runEnv6 = useCustomClaudeDir ? { ...e6, CLAUDE_CONFIG_DIR: targetDir6 } : e6
+    await mkdir(targetDir6, { recursive: true })
+    const fp6 = join(targetDir6, fileName)
+    await writeFile(fp6, init1)
+    const o6 = makeCaptureStream()
+    const p6 = makePromptScript(['n', 'y'])
+    const r6 = await fn(['--dry-run'], {
+      stdout: o6.stream,
+      stderr: makeCaptureStream().stream,
+      env: runEnv6,
+      home: h6,
+      isTTY: true,
+      promptOverride: p6.promptOverride,
+    })
+    check(`${hostLabel} --dry-run on CODE+v1 writes nothing and creates no backup`,
+      r6.exitCode === 0 &&
+      (await readFile(fp6, 'utf-8')) === init1 &&
+      !(await readdir(targetDir6)).some((f) => f.includes('.bak-')) &&
+      o6.text().includes('[dry-run]'))
+  }
+
+  // --remove-line removes exact CODE, v1, and v2 across all three hosts in 1 prompt and leaves custom lines intact
+  for (const [hostLabel, fn, relDir, fileName] of [
+    ['claude-code', runSetupClaudeCode, '.claude', 'CLAUDE.md'],
+    ['antigravity', runSetupAntigravity, '.gemini', 'GEMINI.md'],
+    ['codex', runSetupCodex, '.codex', 'AGENTS.md'],
+  ]) {
+    const { home, env } = await newCaseEnv(hostLabel === 'claude-code' ? 'claude' : hostLabel === 'antigravity' ? 'agy' : 'codex')
+    const dirPath = join(home, relDir)
+    await mkdir(dirPath, { recursive: true })
+    const fp = join(dirPath, fileName)
+    const initial = `# Keep\n${MEGALENS_REVIEW_LINE}\n${DECISION_LINE_V1}\n${DECISION_LINE}\n# Custom: offer a MegaLens review manually\n`
+    await writeFile(fp, initial)
+    const out = makeCaptureStream()
+    const p = makePromptScript(['y'])
+    const res = await fn(['--remove-line'], {
+      stdout: out.stream,
+      stderr: makeCaptureStream().stream,
+      env,
+      home,
+      isTTY: true,
+      promptOverride: p.promptOverride,
+      now: () => new Date('2026-11-16T12:25:00.000Z'),
+    })
+    check(`${hostLabel} --remove-line removes exact CODE, v1, and v2 in 1 prompt and keeps custom lines`,
+      res.exitCode === 0 &&
+      p.prompts.length === 1 &&
+      (await readFile(fp, 'utf-8')) === '# Keep\n# Custom: offer a MegaLens review manually\n' &&
+      out.text().includes(`- ${MEGALENS_REVIEW_LINE}`) &&
+      out.text().includes(`- ${DECISION_LINE_V1}`) &&
+      out.text().includes(`- ${DECISION_LINE}`))
+  }
 }
 
 await rm(root, { recursive: true, force: true })

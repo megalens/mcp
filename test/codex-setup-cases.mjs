@@ -10,12 +10,15 @@ import { spawnSync } from 'node:child_process'
 import {
   CODEX_AGENTS_LINE,
   DECISION_LINE,
+  DECISION_LINE_V1,
   FINAL_MESSAGE,
   hasMegaLensAgentsLine,
   hasMegaLensDecisionLine,
+  hasMegaLensDecisionV1Line,
   getMissingInstructionLines,
   runSetupCodex,
 } from '../bin/codex-setup.mjs'
+import { planInstructionLineUpdates } from '../bin/setup-shared.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const CLI = join(HERE, '..', 'bin', 'cli.mjs')
@@ -1191,7 +1194,10 @@ async function newHome(useDefaultHome = false) {
   check('detection matches user-edited variants independently (CR & BOM tolerant)',
     hasMegaLensAgentsLine('\uFEFF- After you change code in billing, always offer a MegaLens review first.\r\n') &&
     !hasMegaLensDecisionLine('\uFEFF- After you change code in billing, always offer a MegaLens review first.\r\n') &&
-    hasMegaLensDecisionLine('When the user is making a decision that is hard to undo, ask MegaLens.\r\n') &&
+    hasMegaLensDecisionLine('Before you or the user settle a decision that is hard to undo, ask MegaLens.\r\n') &&
+    !hasMegaLensAgentsLine('Before you or the user settle a decision that is hard to undo, ask MegaLens.\r\n') &&
+    hasMegaLensDecisionV1Line('When the user is making a decision that is hard to undo, ask MegaLens.\r\n') &&
+    !hasMegaLensDecisionLine('When the user is making a decision that is hard to undo, ask MegaLens.\r\n') &&
     !hasMegaLensAgentsLine('When the user is making a decision that is hard to undo, ask MegaLens.\r\n'))
 
   const editedOldOnly = 'Please Offer a MegaLens review before merge.'
@@ -1201,7 +1207,7 @@ async function newHome(useDefaultHome = false) {
     getMissingInstructionLines(editedOldOnly).length === 1 &&
     getMissingInstructionLines(editedOldOnly)[0] === DECISION_LINE)
 
-  const newVariantWithOffer = 'When making a decision that is hard to undo, offer a MegaLens review once.'
+  const newVariantWithOffer = 'Before you or the user settle a decision that is hard to undo, offer a MegaLens review once.'
   check('detection new-line variant containing "offer a MegaLens review" alone -> only OLD line missing',
     !hasMegaLensAgentsLine(newVariantWithOffer) &&
     hasMegaLensDecisionLine(newVariantWithOffer) &&
@@ -1213,6 +1219,21 @@ async function newHome(useDefaultHome = false) {
     hasMegaLensAgentsLine(editedOldAndNew) &&
     hasMegaLensDecisionLine(editedOldAndNew) &&
     getMissingInstructionLines(editedOldAndNew).length === 0)
+
+  // Hard-wrapped v2 decision line over two physical lines is NOT read as the CODE line
+  const wrappedV2SplitA = [
+    'Before you or the user settle a decision that is hard to undo (choosing a database or data model, adding sign-in or payments, picking a major library or architecture),',
+    'starting a new project, or doing deep research, offer a MegaLens review once for that task and wait for a yes before running it. Do not offer it for small questions or routine edits.',
+  ].join('\n')
+  const wrappedV2SplitB = [
+    'Before you or the user settle a decision that is hard to undo (choosing a database or data model, adding sign-in or payments, picking a major library or architecture), starting a new project, or doing deep research, offer a MegaLens review',
+    'once for that task and wait for a yes before running it. Do not offer it for small questions or routine edits.',
+  ].join('\n')
+  check('detection hard-wrapped v2 over two physical lines is NOT read as the CODE line',
+    !hasMegaLensAgentsLine(wrappedV2SplitA) &&
+    !hasMegaLensAgentsLine(wrappedV2SplitB) &&
+    getMissingInstructionLines(wrappedV2SplitA).includes(CODEX_AGENTS_LINE) &&
+    getMissingInstructionLines(wrappedV2SplitB).includes(CODEX_AGENTS_LINE))
 
   // Old-only AGENTS.md -> adds only new line, leaves old untouched
   const { home: h1, codexHome: ch1, env: e1 } = await newHome(false)
@@ -1285,14 +1306,14 @@ async function newHome(useDefaultHome = false) {
     r3.exitCode === 0 &&
     (await readFile(ap3, 'utf-8')) === `${newOnly}${CODEX_AGENTS_LINE}\n`)
 
-  // Both present (variant of old + variant of new) -> no prompt, no change, no backup
+  // Both present (variant of old + variant of v2) -> no prompt, no change, no backup
   const { home: h4, codexHome: ch4, env: e4 } = await newHome(false)
   await mkdir(ch4, { recursive: true })
   const ap4 = join(ch4, 'AGENTS.md')
   const bothVariants = [
     '# Rules',
     'After you change code touching billing, offer a MegaLens review.',
-    'When making a decision that is hard to undo, ask MegaLens.',
+    'Before you or the user settle a decision that is hard to undo, ask MegaLens.',
     '',
   ].join('\n')
   await writeFile(ap4, bothVariants)
@@ -1335,6 +1356,292 @@ async function newHome(useDefaultHome = false) {
     (await readFile(ap5, 'utf-8')) === oldOnly &&
     !(await readdir(ch5)).some((f) => f.includes('.bak-')) &&
     o5.text().includes('[dry-run]'))
+}
+
+// ── 24. Decision line v2 migration & edge cases for Codex (0.3.10) ───────────
+{
+  const hasLoneLf = (s) => /[^\r]\n/.test(s) || s.startsWith('\n')
+
+  // CODE + v1 (with CRLF + surrounding lines) -> v1 replaced in place by v2, CODE untouched, position & CRLF kept
+  const { home: h1, codexHome: ch1, env: e1 } = await newHome(false)
+  await mkdir(ch1, { recursive: true })
+  const ap1 = join(ch1, 'AGENTS.md')
+  const codeV1Crlf = `# Top\r\n${CODEX_AGENTS_LINE}\r\n# Mid\r\n${DECISION_LINE_V1}\r\n# Bottom\r\n`
+  await writeFile(ap1, codeV1Crlf)
+  const o1 = makeCaptureStream()
+  const p1 = makePromptScript(['n', 'y'])
+  const r1 = await runSetupCodex([], {
+    stdout: o1.stream,
+    stderr: makeCaptureStream().stream,
+    env: { ...e1, MEGALENS_TOKEN: TOKEN_A },
+    home: h1,
+    isTTY: true,
+    tomlHelpers,
+    promptOverride: p1.promptOverride,
+    now: () => new Date('2026-11-16T12:10:00.000Z'),
+  })
+  const after1 = await readFile(ap1, 'utf-8')
+  const expected1 = `# Top\r\n${CODEX_AGENTS_LINE}\r\n# Mid\r\n${DECISION_LINE}\r\n# Bottom\r\n`
+  check('codex CODE+v1 (CRLF) -> replaces v1 in place with v2, keeps CODE/position/CRLF',
+    r1.exitCode === 0 &&
+    after1 === expected1 &&
+    !hasLoneLf(after1) &&
+    o1.text().includes(`Update this line: ${DECISION_LINE_V1} -> ${DECISION_LINE}`) &&
+    (await readdir(ch1)).some((f) => f.startsWith('AGENTS.md.bak-')))
+
+  // v1 only -> CODE added + v1 replaced in place in 1 prompt
+  const { home: h2, codexHome: ch2, env: e2 } = await newHome(false)
+  await mkdir(ch2, { recursive: true })
+  const ap2 = join(ch2, 'AGENTS.md')
+  const v1Only = `# Top\n${DECISION_LINE_V1}\n# Bottom\n`
+  await writeFile(ap2, v1Only)
+  const o2 = makeCaptureStream()
+  const p2 = makePromptScript(['n', 'y'])
+  const r2 = await runSetupCodex([], {
+    stdout: o2.stream,
+    stderr: makeCaptureStream().stream,
+    env: { ...e2, MEGALENS_TOKEN: TOKEN_A },
+    home: h2,
+    isTTY: true,
+    tomlHelpers,
+    promptOverride: p2.promptOverride,
+    now: () => new Date('2026-11-16T12:11:00.000Z'),
+  })
+  check('codex v1 only -> adds CODE and replaces v1 in place in 1 prompt',
+    r2.exitCode === 0 &&
+    p2.prompts.length === 2 &&
+    (await readFile(ap2, 'utf-8')) === `# Top\n${DECISION_LINE}\n# Bottom\n${CODEX_AGENTS_LINE}\n` &&
+    o2.text().includes(`Update this line: ${DECISION_LINE_V1} -> ${DECISION_LINE}`) &&
+    o2.text().includes(CODEX_AGENTS_LINE))
+
+  // CODE + v1 + v2 -> removes v1, keeps CODE + v2
+  const { home: h3, codexHome: ch3, env: e3 } = await newHome(false)
+  await mkdir(ch3, { recursive: true })
+  const ap3 = join(ch3, 'AGENTS.md')
+  const v1AndV2 = `# Top\n${CODEX_AGENTS_LINE}\n${DECISION_LINE_V1}\n${DECISION_LINE}\n# Bottom\n`
+  await writeFile(ap3, v1AndV2)
+  const o3 = makeCaptureStream()
+  const p3 = makePromptScript(['n', 'y'])
+  const r3 = await runSetupCodex([], {
+    stdout: o3.stream,
+    stderr: makeCaptureStream().stream,
+    env: { ...e3, MEGALENS_TOKEN: TOKEN_A },
+    home: h3,
+    isTTY: true,
+    tomlHelpers,
+    promptOverride: p3.promptOverride,
+    now: () => new Date('2026-11-16T12:12:00.000Z'),
+  })
+  check('codex CODE+v1+v2 -> removes v1, keeps CODE and v2',
+    r3.exitCode === 0 &&
+    (await readFile(ap3, 'utf-8')) === `# Top\n${CODEX_AGENTS_LINE}\n${DECISION_LINE}\n# Bottom\n` &&
+    o3.text().includes(DECISION_LINE_V1))
+
+  // Hard-wrapped v2 over two lines is NOT read as CODE -> adds CODE on y
+  const { home: h4, codexHome: ch4, env: e4 } = await newHome(false)
+  await mkdir(ch4, { recursive: true })
+  const ap4 = join(ch4, 'AGENTS.md')
+  const wrappedV2 = [
+    '# Rules',
+    'Before you or the user settle a decision that is hard to undo (choosing a database or data model, adding sign-in or payments, picking a major library or architecture),',
+    'starting a new project, or doing deep research, offer a MegaLens review once for that task and wait for a yes before running it. Do not offer it for small questions or routine edits.',
+    '',
+  ].join('\n')
+  await writeFile(ap4, wrappedV2)
+  const o4 = makeCaptureStream()
+  const p4 = makePromptScript(['n', 'y'])
+  const r4 = await runSetupCodex([], {
+    stdout: o4.stream,
+    stderr: makeCaptureStream().stream,
+    env: { ...e4, MEGALENS_TOKEN: TOKEN_A },
+    home: h4,
+    isTTY: true,
+    tomlHelpers,
+    promptOverride: p4.promptOverride,
+    now: () => new Date('2026-11-16T12:13:00.000Z'),
+  })
+  check('codex hard-wrapped v2 is NOT read as CODE line -> CODE line added',
+    r4.exitCode === 0 &&
+    (await readFile(ap4, 'utf-8')).includes(CODEX_AGENTS_LINE))
+
+  // --dry-run on CODE + v1 writes nothing and creates no backup
+  const { home: h5, codexHome: ch5, env: e5 } = await newHome(false)
+  await mkdir(ch5, { recursive: true })
+  const ap5 = join(ch5, 'AGENTS.md')
+  await writeFile(ap5, codeV1Crlf)
+  const o5 = makeCaptureStream()
+  const p5 = makePromptScript(['n', 'y'])
+  const r5 = await runSetupCodex(['--dry-run'], {
+    stdout: o5.stream,
+    stderr: makeCaptureStream().stream,
+    env: { ...e5, MEGALENS_TOKEN: TOKEN_A },
+    home: h5,
+    isTTY: true,
+    tomlHelpers,
+    promptOverride: p5.promptOverride,
+  })
+  check('codex --dry-run on CODE+v1 writes nothing and creates no backup',
+    r5.exitCode === 0 &&
+    (await readFile(ap5, 'utf-8')) === codeV1Crlf &&
+    !(await readdir(ch5)).some((f) => f.includes('.bak-')) &&
+    o5.text().includes('[dry-run]') &&
+    o5.text().includes(`Update this line: ${DECISION_LINE_V1} -> ${DECISION_LINE}`))
+}
+
+// ── 25. P2 fix: substring v1 replace/remove preserves surrounding text & CODE ──
+{
+  // 1) `- <v1>` -> `- <v2>` (bullet kept) via runSetupCodex + idempotent second run
+  const { home: h1, codexHome: ch1, env: e1 } = await newHome(false)
+  await mkdir(ch1, { recursive: true })
+  const ap1 = join(ch1, 'AGENTS.md')
+  await writeFile(ap1, `${CODEX_AGENTS_LINE}\n- ${DECISION_LINE_V1}\n`)
+  const o1 = makeCaptureStream()
+  const p1 = makePromptScript(['n', 'y'])
+  const r1 = await runSetupCodex([], {
+    stdout: o1.stream,
+    stderr: makeCaptureStream().stream,
+    env: { ...e1, MEGALENS_TOKEN: TOKEN_A },
+    home: h1,
+    isTTY: true,
+    tomlHelpers,
+    promptOverride: p1.promptOverride,
+    now: () => new Date('2026-11-16T12:30:00.000Z'),
+  })
+  const expected1 = `${CODEX_AGENTS_LINE}\n- ${DECISION_LINE}\n`
+  check('codex `- <v1>` -> `- <v2>` keeps bullet',
+    r1.exitCode === 0 &&
+    (await readFile(ap1, 'utf-8')) === expected1 &&
+    o1.text().includes(`Update this line: ${DECISION_LINE_V1} -> ${DECISION_LINE}`))
+
+  // 2) `"<v1>"` keeps quotes
+  const { home: h2, codexHome: ch2, env: e2 } = await newHome(false)
+  await mkdir(ch2, { recursive: true })
+  const ap2 = join(ch2, 'AGENTS.md')
+  await writeFile(ap2, `${CODEX_AGENTS_LINE}\n"${DECISION_LINE_V1}"\n`)
+  const o2 = makeCaptureStream()
+  const p2 = makePromptScript(['n', 'y'])
+  const r2 = await runSetupCodex([], {
+    stdout: o2.stream,
+    stderr: makeCaptureStream().stream,
+    env: { ...e2, MEGALENS_TOKEN: TOKEN_A },
+    home: h2,
+    isTTY: true,
+    tomlHelpers,
+    promptOverride: p2.promptOverride,
+    now: () => new Date('2026-11-16T12:31:00.000Z'),
+  })
+  check('codex `"<v1>"` -> `"<v2>"` keeps quotes',
+    r2.exitCode === 0 &&
+    (await readFile(ap2, 'utf-8')) === `${CODEX_AGENTS_LINE}\n"${DECISION_LINE}"\n`)
+
+  // 3) `<v1> Also tell Bob.` keeps the tail
+  const { home: h3, codexHome: ch3, env: e3 } = await newHome(false)
+  await mkdir(ch3, { recursive: true })
+  const ap3 = join(ch3, 'AGENTS.md')
+  await writeFile(ap3, `${CODEX_AGENTS_LINE}\n${DECISION_LINE_V1} Also tell Bob.\n`)
+  const o3 = makeCaptureStream()
+  const p3 = makePromptScript(['n', 'y'])
+  const r3 = await runSetupCodex([], {
+    stdout: o3.stream,
+    stderr: makeCaptureStream().stream,
+    env: { ...e3, MEGALENS_TOKEN: TOKEN_A },
+    home: h3,
+    isTTY: true,
+    tomlHelpers,
+    promptOverride: p3.promptOverride,
+    now: () => new Date('2026-11-16T12:32:00.000Z'),
+  })
+  check('codex `<v1> Also tell Bob.` keeps tail',
+    r3.exitCode === 0 &&
+    (await readFile(ap3, 'utf-8')) === `${CODEX_AGENTS_LINE}\n${DECISION_LINE} Also tell Bob.\n`)
+
+  // 4) `<CODE> <v1>` on one line -> CODE kept and v2 present (and no duplicate CODE added)
+  const { home: h4, codexHome: ch4, env: e4 } = await newHome(false)
+  await mkdir(ch4, { recursive: true })
+  const ap4 = join(ch4, 'AGENTS.md')
+  await writeFile(ap4, `${CODEX_AGENTS_LINE} ${DECISION_LINE_V1}\n`)
+  const o4 = makeCaptureStream()
+  const p4 = makePromptScript(['n', 'y'])
+  const r4 = await runSetupCodex([], {
+    stdout: o4.stream,
+    stderr: makeCaptureStream().stream,
+    env: { ...e4, MEGALENS_TOKEN: TOKEN_A },
+    home: h4,
+    isTTY: true,
+    tomlHelpers,
+    promptOverride: p4.promptOverride,
+    now: () => new Date('2026-11-16T12:33:00.000Z'),
+  })
+  check('codex `<CODE> <v1>` on one line -> CODE kept and v2 present',
+    r4.exitCode === 0 &&
+    (await readFile(ap4, 'utf-8')) === `${CODEX_AGENTS_LINE} ${DECISION_LINE}\n` &&
+    !o4.text().includes('Add this line:'))
+
+  // 5) v2 present + `- <v1>` -> bullet line removed entirely
+  const { home: h5, codexHome: ch5, env: e5 } = await newHome(false)
+  await mkdir(ch5, { recursive: true })
+  const ap5 = join(ch5, 'AGENTS.md')
+  await writeFile(ap5, `${CODEX_AGENTS_LINE}\n${DECISION_LINE}\n- ${DECISION_LINE_V1}\n# End\n`)
+  const o5 = makeCaptureStream()
+  const p5 = makePromptScript(['n', 'y'])
+  const r5 = await runSetupCodex([], {
+    stdout: o5.stream,
+    stderr: makeCaptureStream().stream,
+    env: { ...e5, MEGALENS_TOKEN: TOKEN_A },
+    home: h5,
+    isTTY: true,
+    tomlHelpers,
+    promptOverride: p5.promptOverride,
+    now: () => new Date('2026-11-16T12:34:00.000Z'),
+  })
+  check('codex v2 present + `- <v1>` -> bullet line removed entirely',
+    r5.exitCode === 0 &&
+    (await readFile(ap5, 'utf-8')) === `${CODEX_AGENTS_LINE}\n${DECISION_LINE}\n# End\n`)
+
+  // 6) v2 present + `<v1> Also tell Bob.` -> only v1 text removed, tail kept
+  const { home: h6, codexHome: ch6, env: e6 } = await newHome(false)
+  await mkdir(ch6, { recursive: true })
+  const ap6 = join(ch6, 'AGENTS.md')
+  await writeFile(ap6, `${CODEX_AGENTS_LINE}\n${DECISION_LINE}\n${DECISION_LINE_V1} Also tell Bob.\n`)
+  const o6 = makeCaptureStream()
+  const p6 = makePromptScript(['n', 'y'])
+  const r6 = await runSetupCodex([], {
+    stdout: o6.stream,
+    stderr: makeCaptureStream().stream,
+    env: { ...e6, MEGALENS_TOKEN: TOKEN_A },
+    home: h6,
+    isTTY: true,
+    tomlHelpers,
+    promptOverride: p6.promptOverride,
+    now: () => new Date('2026-11-16T12:35:00.000Z'),
+  })
+  check('codex v2 present + `<v1> Also tell Bob.` -> only v1 text removed, tail kept',
+    r6.exitCode === 0 &&
+    (await readFile(ap6, 'utf-8')) === `${CODEX_AGENTS_LINE}\n${DECISION_LINE}\nAlso tell Bob.\n`)
+
+  // 7) v2 present + line merely quoting v1 opening + "MegaLens" -> NOT removed
+  const quoteNote = `${CODEX_AGENTS_LINE}\n${DECISION_LINE}\nNote: we replaced "When the user is making a decision that is hard to undo" with the new MegaLens rule.\n`
+  const planNote = planInstructionLineUpdates(quoteNote)
+  check('v2 present + line quoting v1 opening + MegaLens is NOT removed',
+    !planNote.hasChanges &&
+    planNote.removals.length === 0 &&
+    planNote.nextContent === quoteNote)
+
+  // 8) Pattern-only reworded v1 with bullet keeps bullet prefix, and BOM/CRLF preserved
+  const rewordedBullet = `\uFEFF${CODEX_AGENTS_LINE}\r\n- When the user is making a decision that is hard to undo, ask MegaLens.\r\n`
+  const planReworded = planInstructionLineUpdates(rewordedBullet)
+  check('pattern-only reworded v1 keeps bullet prefix, BOM, and CRLF',
+    planReworded.hasChanges &&
+    planReworded.replacements.length === 1 &&
+    planReworded.nextContent === `\uFEFF${CODEX_AGENTS_LINE}\r\n- ${DECISION_LINE}\r\n`)
+
+  // 9) BOM on removed `- <v1>` moves BOM to surviving line and keeps CRLF
+  const bomRemove = `\uFEFF- ${DECISION_LINE_V1}\r\n${CODEX_AGENTS_LINE}\r\n${DECISION_LINE}\r\n`
+  const planBomRemove = planInstructionLineUpdates(bomRemove)
+  check('v2 present + BOM on removed `- <v1>` preserves BOM and CRLF',
+    planBomRemove.hasChanges &&
+    planBomRemove.removals.length === 1 &&
+    planBomRemove.nextContent === `\uFEFF${CODEX_AGENTS_LINE}\r\n${DECISION_LINE}\r\n`)
 }
 
 await rm(root, { recursive: true, force: true })
