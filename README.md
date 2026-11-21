@@ -1,13 +1,12 @@
 # megalens-mcp
 
-Code review from a panel of AI models, inside the AI tool you already use. MegaLens selects up to four
-AI models from different companies (such as Anthropic, OpenAI and Google) to review your code, and reports where they agree and where they
-disagree. On Free, MegaLens selects two reviewing models.
+MegaLens is a second reviewer for your code. It reads your change and the code around it and tells you
+what could break. Use it alongside your current reviewer.
 
 Works with Claude Code, Codex CLI, Cursor, Gemini CLI and Lovable, and with any tool that supports
 OAuth MCP connectors, such as ChatGPT and Claude.ai. GitHub Copilot is coming soon.
 
-Your first review is free, with no card.
+Your first Standard review is free, with no card.
 
 ## Quick Start
 
@@ -20,8 +19,6 @@ The setup wizard:
 2. Detects installed tools automatically
 3. Writes the correct config for each tool
 
-The wizard does not ask for an OpenRouter key. To use your own key, add one header by hand: see
-[Adding your own OpenRouter key](#adding-your-own-openrouter-key-free--byok).
 
 ## Supported Tools
 
@@ -51,7 +48,7 @@ The tools use two config languages and three different top-level keys, which is 
 exists.
 
 **Keep the `?ide=` on each URL.** It tells MegaLens which tool the review came from. It does not
-change which models review your code: the panel is the same whichever tool you call it from.
+change how your review runs: it is the same whichever tool you call it from.
 
 ### Claude Code
 
@@ -141,25 +138,16 @@ url = "https://megalens.ai/api/mcp?ide=codex"
 http_headers = { "Authorization" = "Bearer ml_tok_your_token_here" }
 ```
 
-### Adding your own OpenRouter key (free / BYOK)
+### Paying for reviews
 
-Add one more header alongside `Authorization`, in whichever shape your tool uses above. The key
-needs credit on it. You pay OpenRouter directly; MegaLens is not part of that bill.
+Your first Standard review is free, with no card. After that, a review uses credits.
 
-```
-"x-megalens-openrouter-key": "sk-or-v1-your-openrouter-key"
-```
+- Plans give you credits every month: Plus $19 a month for 20 credits, Pro $69 for 80, Max $199 for 250.
+- Pay as you go: $1.25 a credit, from $10 (8 credits), no extra fee. Credits you buy never expire.
+- A Standard review uses 1 credit and a Deep review uses 8. Reviews from this connector use 1 to 3
+  credits, depending on the size of what you send.
 
-In Codex TOML:
-
-```toml
-http_headers = { "Authorization" = "Bearer ml_tok_your_token_here", "x-megalens-openrouter-key" = "sk-or-v1-your-openrouter-key" }
-```
-
-With Claude Code's command, add `--header "x-megalens-openrouter-key: sk-or-v1-your-openrouter-key"`.
-
-If you skip the key, use pay as you go credits instead. See [current pricing](https://megalens.ai/pricing)
-for the rate and how reviews are counted, including plans with AI usage included.
+See [current pricing](https://megalens.ai/pricing).
 
 ## Commands
 
@@ -229,25 +217,16 @@ npx megalens-mcp setup agy [--remove-line] [--dry-run] [-h|--help]
 
 ## How It Works
 
-MegaLens selects up to four AI models from different companies to review your code. They review it
-separately. A final check reviews their findings, and you get back where they agreed and where they
-disagreed. Each result names the models that actually took part.
+You ask for a review. MegaLens reads the change and related files with read-only tools and returns one
+findings list. Each finding says what is wrong, how it would fail, and where.
 
-If you send your own assessment with the request, the answer also says what the panel found that
-yours did not.
-
-The panel is the same whichever tool you call it from. MegaLens reports; it does not change your
-code. Your own tool stays the one that decides what to do next.
-
-> **Our private recipe.** What stays private: how we choose the models and what each one is asked to do,
-> the numbers that tune each check, and the prompts. That recipe came from months of measured runs and
-> changes as models change. Our results, rules and mistakes are public:
-> [megalens.ai/research/ai-code-review-false-positives](https://megalens.ai/research/ai-code-review-false-positives)
+MegaLens reports; it does not change your code. Your own tool stays the one that decides what to do
+next. Results vary from run to run, so use MegaLens alongside your current reviewer.
 
 ## Requirements
 
 - Node.js 18+ (only for the setup wizard; manual setup needs nothing)
-- A MegaLens account: [megalens.ai](https://megalens.ai). Your first review is free, with no card
+- A MegaLens account: [megalens.ai](https://megalens.ai). Your first Standard review is free, with no card
 
 ## Links
 
