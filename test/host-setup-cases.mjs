@@ -12,16 +12,22 @@ import {
   MEGALENS_REVIEW_LINE,
   DECISION_LINE,
   DECISION_LINE_V1,
+  CLAUDE_MCP_URL,
   CLAUDE_DOCS_URL,
   ANTIGRAVITY_DOCS_URL,
   CLAUDE_FINAL_MESSAGE,
   ANTIGRAVITY_FINAL_MESSAGE,
   GEMINI_CLI_SHARED_NOTE,
   GEMINI_CLI_SHARED_NOTE_SINGLE,
-  runSetupClaudeCode,
-  runSetupAntigravity,
+  runSetupClaudeCode as rawRunSetupClaudeCode,
+  runSetupAntigravity as rawRunSetupAntigravity,
 } from '../bin/host-setup.mjs'
-import { runSetupCodex } from '../bin/codex-setup.mjs'
+import { runSetupCodex as rawRunSetupCodex } from '../bin/codex-setup.mjs'
+
+const okDefaultValidator = async () => ({ ok: true, isPro: false, isPayg: true, planCode: 'test', label: 'default' })
+const runSetupClaudeCode = (args = [], io = {}) => rawRunSetupClaudeCode(args, { validateToken: okDefaultValidator, ...io })
+const runSetupAntigravity = (args = [], io = {}) => rawRunSetupAntigravity(args, { validateToken: okDefaultValidator, ...io })
+const runSetupCodex = (args = [], io = {}) => rawRunSetupCodex(args, { validateToken: okDefaultValidator, ...io })
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const CLI = join(HERE, '..', 'bin', 'cli.mjs')
@@ -150,7 +156,7 @@ async function readStubCalls(stubLog) {
   }
 }
 
-// ── 1. Claude Code: fresh home yes/yes (hidden token + exact argv + CLAUDE.md) ─
+// ── 1. Claude Code: fresh home yes/yes (hidden token + direct 0600 ~/.claude.json + 0 child procs + CLAUDE.md) ─
 {
   const { home, stubLog, env } = await newCaseEnv('claude')
   const out = makeCaptureStream()
@@ -168,43 +174,34 @@ async function readStubCalls(stubLog) {
   })
 
   const calls = await readStubCalls(stubLog)
+  const claudeCfgPath = join(home, '.claude.json')
+  const claudeCfg = JSON.parse(await readFile(claudeCfgPath, 'utf-8'))
   const claudeMdPath = join(home, '.claude', 'CLAUDE.md')
   const claudeMd = await readFile(claudeMdPath, 'utf-8').catch(() => '')
 
-  check('claude-code yes/yes: exits 0 and connects',
-    res.exitCode === 0 && res.connected === true && res.written.includes(claudeMdPath))
-  check('claude-code yes/yes: stub received exact get and add argv',
-    calls.length === 2 &&
-    calls[0].bin === 'claude' &&
-    JSON.stringify(calls[0].argv) === JSON.stringify(['mcp', 'get', 'megalens']) &&
-    calls[1].bin === 'claude' &&
-    JSON.stringify(calls[1].argv) === JSON.stringify([
-      'mcp',
-      'add',
-      '--scope',
-      'user',
-      '--transport',
-      'http',
-      'megalens',
-      'https://megalens.ai/api/mcp?ide=claude-code',
-      '--header',
-      `Authorization: Bearer ${TOKEN_A}`,
-    ]))
+  check('claude-code yes/yes: exits 0, connects, writes ~/.claude.json and CLAUDE.md',
+    res.exitCode === 0 && res.connected === true && res.written.includes(claudeCfgPath) && res.written.includes(claudeMdPath))
+  check('claude-code yes/yes (Astra FINAL #2): writes ~/.claude.json directly at 0600 with 0 child-process invocations (no token in argv)',
+    calls.length === 0 &&
+    ((await stat(claudeCfgPath)).mode & 0o777) === 0o600 &&
+    claudeCfg.mcpServers.megalens.type === 'http' &&
+    claudeCfg.mcpServers.megalens.url === 'https://megalens.ai/api/mcp?ide=claude-code' &&
+    claudeCfg.mcpServers.megalens.headers.Authorization === `Bearer ${TOKEN_A}`)
   check('claude-code yes/yes: CLAUDE.md created with both exact lines and mode 0644',
     claudeMd === `${MEGALENS_REVIEW_LINE}\n${DECISION_LINE}\n` &&
     ((await stat(claudeMdPath)).mode & 0o777) === 0o644)
-  check('claude-code yes/yes: prompts show path, lines, masked cmd; final message matches spec; no token leak',
+  check('claude-code yes/yes: prompts show path, lines, masked preview; final message matches spec; no token leak',
     prompts.length === 3 &&
     out.text().includes(MEGALENS_REVIEW_LINE) &&
     out.text().includes(DECISION_LINE) &&
     prompts.some((p) => p.prompt.includes('Add these lines to')) &&
-    out.text().includes('Authorization: Bearer ml_tok_****') &&
+    out.text().includes('Bearer ml_tok_****') &&
     out.text().includes(CLAUDE_FINAL_MESSAGE) &&
     !out.text().includes(SECRET_PART_A) &&
     !err.text().includes(SECRET_PART_A))
 }
 
-// ── 2. Antigravity: fresh home yes/yes (MEGALENS_TOKEN + exact argv + GEMINI.md + Gemini CLI note) ─
+// ── 2. Antigravity: fresh home yes/yes (MEGALENS_TOKEN + direct 0600 mcp_config.json + 0 child procs + GEMINI.md) ─
 {
   const { home, stubLog, env } = await newCaseEnv('agy', { MEGALENS_TOKEN: TOKEN_A })
   const out = makeCaptureStream()
@@ -222,22 +219,19 @@ async function readStubCalls(stubLog) {
   })
 
   const calls = await readStubCalls(stubLog)
+  const agyCfgPath = join(home, '.gemini', 'config', 'mcp_config.json')
+  const agyCfg = JSON.parse(await readFile(agyCfgPath, 'utf-8'))
   const geminiMdPath = join(home, '.gemini', 'GEMINI.md')
   const geminiMd = await readFile(geminiMdPath, 'utf-8').catch(() => '')
 
-  check('antigravity yes/yes: exits 0 and connects',
-    res.exitCode === 0 && res.connected === true && res.written.includes(geminiMdPath))
-  check('antigravity yes/yes: stub received exact add argv with ide=antigravity',
-    calls.length === 1 &&
-    calls[0].bin === 'agy' &&
-    JSON.stringify(calls[0].argv) === JSON.stringify([
-      'mcp',
-      'add',
-      '--header',
-      `Authorization: Bearer ${TOKEN_A}`,
-      'megalens',
-      'https://megalens.ai/api/mcp?ide=antigravity',
-    ]))
+  check('antigravity yes/yes: exits 0, connects, writes mcp_config.json and GEMINI.md',
+    res.exitCode === 0 && res.connected === true && res.written.includes(agyCfgPath) && res.written.includes(geminiMdPath))
+  check('antigravity yes/yes (Astra FINAL #2): writes mcp_config.json directly at 0600 with 0 child-process invocations (no token in argv)',
+    calls.length === 0 &&
+    ((await stat(agyCfgPath)).mode & 0o777) === 0o600 &&
+    agyCfg.mcpServers.megalens.disabled === false &&
+    agyCfg.mcpServers.megalens.serverUrl === 'https://megalens.ai/api/mcp?ide=antigravity' &&
+    agyCfg.mcpServers.megalens.headers.Authorization === `Bearer ${TOKEN_A}`)
   check('antigravity yes/yes: prompt includes Gemini CLI sentence and writes both lines to GEMINI.md',
     prompts.some((p) => p.prompt.includes(GEMINI_CLI_SHARED_NOTE) && p.prompt.includes('Add these lines to')) &&
     geminiMd === `${MEGALENS_REVIEW_LINE}\n${DECISION_LINE}\n` &&
@@ -269,7 +263,7 @@ async function readStubCalls(stubLog) {
     acalls.length === 0 &&
     (await readdir(ah)).length === 0)
 
-  // Claude Code: no/no never calls add/remove and writes nothing
+  // Claude Code: no/no never spawns claude and writes nothing
   const { home: ch, stubLog: cl, env: ce } = await newCaseEnv('claude', { MEGALENS_TOKEN: TOKEN_A })
   const co = makeCaptureStream()
   const cer = makeCaptureStream()
@@ -283,152 +277,182 @@ async function readStubCalls(stubLog) {
     promptOverride: cp.promptOverride,
   })
   const ccalls = await readStubCalls(cl)
-  check('claude-code empty/no: exits 0, writes nothing, never runs add/remove',
+  check('claude-code empty/no: exits 0, writes nothing, spawns 0 child processes',
     cres.exitCode === 0 &&
     cres.written.length === 0 &&
     !cres.connected &&
-    ccalls.every((c) => c.argv[1] === 'get') &&
+    ccalls.length === 0 &&
     (await readdir(ch)).length === 0)
 }
 
-// ── 4. CLI missing (writes nothing on n; writes only line on y; prints manual cmd + docs) ─
+// ── 4. Host CLI absent from PATH: direct private config write still works (no child process needed) ─
 {
-  for (const [label, fn, docsUrl, expectedCmdPrefix, relMd] of [
-    ['claude-code', runSetupClaudeCode, CLAUDE_DOCS_URL, 'claude mcp add --scope user', join('.claude', 'CLAUDE.md')],
-    ['antigravity', runSetupAntigravity, ANTIGRAVITY_DOCS_URL, 'agy mcp add --header', join('.gemini', 'GEMINI.md')],
+  for (const [label, fn, cfgRel, relMd] of [
+    ['claude-code', runSetupClaudeCode, '.claude.json', join('.claude', 'CLAUDE.md')],
+    ['antigravity', runSetupAntigravity, join('.gemini', 'config', 'mcp_config.json'), join('.gemini', 'GEMINI.md')],
   ]) {
-    const { home, env } = await newCaseEnv(label, { PATH: emptyBinDir })
+    const { home, env } = await newCaseEnv(label, { PATH: emptyBinDir, MEGALENS_TOKEN: TOKEN_A })
     const o1 = makeCaptureStream()
     const e1 = makeCaptureStream()
-    const p1 = makePromptScript(['n'])
+    const p1 = makePromptScript(['n', 'n'])
     const r1 = await fn([], { stdout: o1.stream, stderr: e1.stream, env, home, isTTY: true, promptOverride: p1.promptOverride })
-    check(`${label} CLI missing + n: prints masked command + docs link, writes nothing`,
-      r1.exitCode === 0 &&
-      r1.written.length === 0 &&
-      o1.text().includes(expectedCmdPrefix) &&
-      o1.text().includes('ml_tok_****') &&
-      o1.text().includes(docsUrl) &&
-      (await readdir(home)).length === 0)
+    check(`${label} without host CLI on PATH + n/n: exits 0, writes nothing`,
+      r1.exitCode === 0 && r1.written.length === 0 && (await readdir(home)).length === 0)
 
-    const { home: h2, env: env2 } = await newCaseEnv(label, { PATH: emptyBinDir })
+    const { home: h2, env: env2 } = await newCaseEnv(label, { PATH: emptyBinDir, MEGALENS_TOKEN: TOKEN_A })
     const o2 = makeCaptureStream()
     const e2 = makeCaptureStream()
-    const p2 = makePromptScript(['y'])
+    const p2 = makePromptScript(['y', 'y'])
     const r2 = await fn([], { stdout: o2.stream, stderr: e2.stream, env: env2, home: h2, isTTY: true, promptOverride: p2.promptOverride })
     const md2 = await readFile(join(h2, relMd), 'utf-8').catch(() => '')
-    check(`${label} CLI missing + y: writes instruction lines only when user wants them`,
-      r2.exitCode === 0 && !r2.connected && r2.written.length === 1 && md2 === `${MEGALENS_REVIEW_LINE}\n${DECISION_LINE}\n`)
+    const cfg2 = JSON.parse(await readFile(join(h2, cfgRel), 'utf-8'))
+    check(`${label} without host CLI on PATH + y/y: writes private 0600 config and instruction lines directly`,
+      r2.exitCode === 0 && r2.connected && cfg2.mcpServers.megalens.headers.Authorization === `Bearer ${TOKEN_A}` && md2 === `${MEGALENS_REVIEW_LINE}\n${DECISION_LINE}\n`)
   }
 }
 
-// ── 5. CLI non-zero exit (no success message, masked stderr) ──────────────────
+// ── 5. Read-only config file refused cleanly without touching it ──────────────
 {
-  for (const [label, fn] of [['claude-code', runSetupClaudeCode], ['antigravity', runSetupAntigravity]]) {
-    const { home, env } = await newCaseEnv(label, {
-      MEGALENS_TOKEN: TOKEN_A,
-      STUB_ADD_EXIT: '2',
-      STUB_ADD_STDERR: `Auth error for Bearer ${TOKEN_A} at endpoint\n`,
-    })
+  for (const [label, fn, cfgRel] of [
+    ['claude-code', runSetupClaudeCode, '.claude.json'],
+    ['antigravity', runSetupAntigravity, join('.gemini', 'config', 'mcp_config.json')],
+  ]) {
+    const { home, env } = await newCaseEnv(label, { MEGALENS_TOKEN: TOKEN_A })
+    const cfgPath = join(home, cfgRel)
+    await mkdir(dirname(cfgPath), { recursive: true })
+    await writeFile(cfgPath, '{"mcpServers":{}}\n', { mode: 0o444 })
+    await chmod(cfgPath, 0o444)
     const out = makeCaptureStream()
     const err = makeCaptureStream()
-    const { promptOverride } = makePromptScript(['y'])
+    const { promptOverride } = makePromptScript(['n'])
     const res = await fn([], { stdout: out.stream, stderr: err.stream, env, home, isTTY: true, promptOverride })
-    check(`${label} CLI non-zero exit: exits 1, no success message, stderr token masked`,
-      res.exitCode === 1 &&
+    await chmod(cfgPath, 0o600)
+    check(`${label} read-only config: skips write, leaves config intact, no token leak`,
+      res.exitCode === 0 &&
       !res.connected &&
-      !out.text().includes('Connected MegaLens') &&
-      !out.text().includes('Restart ') &&
-      err.text().includes('ml_tok_****') &&
-      !err.text().includes(SECRET_PART_A) &&
-      !out.text().includes(SECRET_PART_A))
+      (await readFile(cfgPath, 'utf-8')) === '{"mcpServers":{}}\n' &&
+      out.text().includes('read-only') &&
+      !out.text().includes(SECRET_PART_A) &&
+      !err.text().includes(SECRET_PART_A))
   }
 }
 
-// ── 6. Existing server + replace yes/no ───────────────────────────────────────
+// ── 6. Existing server + update yes/no (preserves other servers, extra keys, and non-credential fields) ─
 {
-  // Claude Code: replace no -> skips remove/add, proceeds to CLAUDE.md
-  const { home: h1, stubLog: l1, env: e1 } = await newCaseEnv('claude', { STUB_GET_EXIT: '0', MEGALENS_TOKEN: TOKEN_A })
+  // Claude Code: existing entry + update no -> untouched
+  const { home: h1, stubLog: l1, env: e1 } = await newCaseEnv('claude', { MEGALENS_TOKEN: TOKEN_A })
+  const c1Init = JSON.stringify({ theme: 'dark', mcpServers: { other: { url: 'https://other' }, megalens: { type: 'http', url: 'https://old', headers: { Authorization: `Bearer ${TOKEN_A}` } } } })
+  await writeFile(join(h1, '.claude.json'), c1Init)
   const o1 = makeCaptureStream()
   const er1 = makeCaptureStream()
   const p1 = makePromptScript(['n', 'n'])
   const r1 = await runSetupClaudeCode([], { stdout: o1.stream, stderr: er1.stream, env: e1, home: h1, isTTY: true, promptOverride: p1.promptOverride })
-  const calls1 = await readStubCalls(l1)
-  check('claude-code existing server + replace n: only calls get, no remove/add, prompts for CLAUDE.md',
+  check('claude-code existing server + update n: untouched, 0 child calls, prompts for CLAUDE.md',
     r1.exitCode === 0 &&
     !r1.connected &&
-    calls1.length === 1 &&
-    calls1[0].argv[1] === 'get' &&
+    (await readStubCalls(l1)).length === 0 &&
+    (await readFile(join(h1, '.claude.json'), 'utf-8')) === c1Init &&
     p1.prompts.length === 2)
 
-  // Claude Code: replace yes -> remove then add
-  const { home: h2, stubLog: l2, env: e2 } = await newCaseEnv('claude', { STUB_GET_EXIT: '0', MEGALENS_TOKEN: TOKEN_B })
+  // Claude Code: existing SAME-ORIGIN entry + update y -> updates token+url, preserves other servers, disabled flag & custom headers, creates 0600 backup
+  const { home: h2, stubLog: l2, env: e2 } = await newCaseEnv('claude', { MEGALENS_TOKEN: TOKEN_B })
+  await writeFile(join(h2, '.claude.json'), JSON.stringify({ theme: 'dark', mcpServers: { other: { url: 'https://other' }, megalens: { disabled: true, type: 'http', url: 'https://megalens.ai/api/mcp', headers: { 'X-Custom': '1', authorization: `Bearer ${TOKEN_A}`, Authorization: `Bearer ${TOKEN_A}` } } } }))
   const o2 = makeCaptureStream()
   const er2 = makeCaptureStream()
   const p2 = makePromptScript(['y', 'n'])
-  const r2 = await runSetupClaudeCode([], { stdout: o2.stream, stderr: er2.stream, env: e2, home: h2, isTTY: true, promptOverride: p2.promptOverride })
-  const calls2 = await readStubCalls(l2)
-  check('claude-code existing server + replace y: runs get -> remove --scope user -> add with new token',
+  const r2 = await runSetupClaudeCode([], { stdout: o2.stream, stderr: er2.stream, env: e2, home: h2, isTTY: true, promptOverride: p2.promptOverride, now: () => new Date('2026-11-22T07:00:00.000Z') })
+  const c2After = JSON.parse(await readFile(join(h2, '.claude.json'), 'utf-8'))
+  const h2Files = await readdir(h2)
+  check('claude-code existing same-origin server + update y: updates directly at 0600, preserves other servers, custom flags & same-origin headers, drops duplicate lowercase auth',
     r2.exitCode === 0 &&
     r2.connected === true &&
-    calls2.length === 3 &&
-    calls2[0].argv.join(' ') === 'mcp get megalens' &&
-    calls2[1].argv.join(' ') === 'mcp remove --scope user megalens' &&
-    calls2[2].argv[1] === 'add' &&
-    calls2[2].argv[9] === `Authorization: Bearer ${TOKEN_B}` &&
+    (await readStubCalls(l2)).length === 0 &&
+    c2After.theme === 'dark' &&
+    c2After.mcpServers.other.url === 'https://other' &&
+    c2After.mcpServers.megalens.disabled === true &&
+    c2After.mcpServers.megalens.url === 'https://megalens.ai/api/mcp?ide=claude-code' &&
+    c2After.mcpServers.megalens.headers['X-Custom'] === '1' &&
+    c2After.mcpServers.megalens.headers.Authorization === `Bearer ${TOKEN_B}` &&
+    !('authorization' in c2After.mcpServers.megalens.headers) &&
+    h2Files.some((f) => f.startsWith('.claude.json.bak-')) &&
     !o2.text().includes(SECRET_PART_B))
 
-  // Claude Code: replace yes -> remove fails -> add NOT called, exits 1, clear .mcp.json message
-  const { home: h2b, stubLog: l2b, env: e2b } = await newCaseEnv('claude', {
-    STUB_GET_EXIT: '0',
-    STUB_REMOVE_EXIT: '1',
-    STUB_REMOVE_STDERR: `cannot remove Bearer ${TOKEN_B}\n`,
-    MEGALENS_TOKEN: TOKEN_B,
-  })
-  const o2b = makeCaptureStream()
-  const er2b = makeCaptureStream()
-  const p2b = makePromptScript(['y'])
-  const r2b = await runSetupClaudeCode([], { stdout: o2b.stream, stderr: er2b.stream, env: e2b, home: h2b, isTTY: true, promptOverride: p2b.promptOverride })
-  const calls2b = await readStubCalls(l2b)
-  check('claude-code existing server + remove fails: exits 1, add not called, clear user-settings/.mcp.json message, stderr masked',
-    r2b.exitCode === 1 &&
-    !r2b.connected &&
-    r2b.written.length === 0 &&
-    calls2b.length === 2 &&
-    calls2b[1].argv.join(' ') === 'mcp remove --scope user megalens' &&
-    er2b.text().includes('user settings') &&
-    er2b.text().includes('.mcp.json') &&
-    er2b.text().includes('ml_tok_****') &&
-    !er2b.text().includes(SECRET_PART_B) &&
-    (await readdir(h2b)).length === 0)
+  // Claude Code (Astra CONFIRM10 #12): changing origin from another host to MegaLens MUST NOT carry old headers (e.g. proxy API keys)
+  const { home: h2x, env: e2x } = await newCaseEnv('claude', { MEGALENS_TOKEN: TOKEN_B })
+  await writeFile(join(h2x, '.claude.json'), JSON.stringify({
+    mcpServers: {
+      megalens: {
+        disabled: true,
+        type: 'http',
+        url: 'https://proxy.example.com/mcp',
+        serverUrl: 'https://proxy.example.com/mcp',
+        headers: { 'X-Proxy-Api-Key': 'proxy-secret-999', Authorization: 'Bearer other-host-token' },
+      },
+    },
+  }))
+  const o2x = makeCaptureStream()
+  const er2x = makeCaptureStream()
+  const r2x = await runSetupClaudeCode([], { stdout: o2x.stream, stderr: er2x.stream, env: e2x, home: h2x, isTTY: true, promptOverride: makePromptScript(['y', 'n']).promptOverride })
+  const c2xAfter = JSON.parse(await readFile(join(h2x, '.claude.json'), 'utf-8'))
+  check('claude-code cross-origin update (Astra CONFIRM10 #12): drops old host headers and stale alternate URL fields while keeping disabled flag',
+    r2x.exitCode === 0 &&
+    r2x.connected === true &&
+    c2xAfter.mcpServers.megalens.disabled === true &&
+    c2xAfter.mcpServers.megalens.url === 'https://megalens.ai/api/mcp?ide=claude-code' &&
+    !('serverUrl' in c2xAfter.mcpServers.megalens) &&
+    c2xAfter.mcpServers.megalens.headers.Authorization === `Bearer ${TOKEN_B}` &&
+    !('X-Proxy-Api-Key' in c2xAfter.mcpServers.megalens.headers))
 
-  // Antigravity: existing entry in mcp_config.json + replace no
+  // Antigravity (Astra CONFIRM10 #12): changing serverUrl origin drops old host headers; same-origin preserves custom headers
+  const { home: h4x, env: e4x } = await newCaseEnv('agy', { MEGALENS_TOKEN: TOKEN_B })
+  await mkdir(join(h4x, '.gemini', 'config'), { recursive: true })
+  await writeFile(join(h4x, '.gemini', 'config', 'mcp_config.json'), JSON.stringify({
+    mcpServers: {
+      megalens: {
+        disabled: true,
+        serverUrl: 'https://other-gateway.example/mcp',
+        headers: { 'X-Gateway-Key': 'gw-secret', Authorization: 'Bearer other' },
+      },
+    },
+  }))
+  const r4x = await runSetupAntigravity([], { stdout: makeCaptureStream().stream, stderr: makeCaptureStream().stream, env: e4x, home: h4x, isTTY: true, promptOverride: makePromptScript(['y', 'n']).promptOverride })
+  const agy4xAfter = JSON.parse(await readFile(join(h4x, '.gemini', 'config', 'mcp_config.json'), 'utf-8'))
+  check('antigravity cross-origin update (Astra CONFIRM10 #12): drops old host headers while keeping disabled flag',
+    r4x.exitCode === 0 &&
+    agy4xAfter.mcpServers.megalens.disabled === true &&
+    agy4xAfter.mcpServers.megalens.serverUrl === 'https://megalens.ai/api/mcp?ide=antigravity' &&
+    agy4xAfter.mcpServers.megalens.headers.Authorization === `Bearer ${TOKEN_B}` &&
+    !('X-Gateway-Key' in agy4xAfter.mcpServers.megalens.headers))
+
+  // Antigravity: existing entry in mcp_config.json + update no
   const { home: h3, stubLog: l3, env: e3 } = await newCaseEnv('agy', { MEGALENS_TOKEN: TOKEN_A })
   await mkdir(join(h3, '.gemini', 'config'), { recursive: true })
-  await writeFile(join(h3, '.gemini', 'config', 'mcp_config.json'), JSON.stringify({ mcpServers: { megalens: { serverUrl: 'old' } } }))
+  const agy3Init = JSON.stringify({ mcpServers: { megalens: { serverUrl: 'old' } } })
+  await writeFile(join(h3, '.gemini', 'config', 'mcp_config.json'), agy3Init)
   const o3 = makeCaptureStream()
   const er3 = makeCaptureStream()
   const p3 = makePromptScript(['n', 'n'])
   const r3 = await runSetupAntigravity([], { stdout: o3.stream, stderr: er3.stream, env: e3, home: h3, isTTY: true, promptOverride: p3.promptOverride })
-  const calls3 = await readStubCalls(l3)
-  check('antigravity existing server + replace n: runs 0 stub calls and leaves mcp_config.json intact',
-    r3.exitCode === 0 && !r3.connected && calls3.length === 0 && p3.prompts.length === 2)
+  check('antigravity existing server + update n: runs 0 stub calls and leaves mcp_config.json intact',
+    r3.exitCode === 0 && !r3.connected && (await readStubCalls(l3)).length === 0 && (await readFile(join(h3, '.gemini', 'config', 'mcp_config.json'), 'utf-8')) === agy3Init && p3.prompts.length === 2)
 
-  // Antigravity: existing entry in mcp_config.json + replace yes
+  // Antigravity: existing entry in mcp_config.json + update yes (preserves disabled: true & other servers)
   const { home: h4, stubLog: l4, env: e4 } = await newCaseEnv('agy', { MEGALENS_TOKEN: TOKEN_B })
   await mkdir(join(h4, '.gemini', 'config'), { recursive: true })
-  await writeFile(join(h4, '.gemini', 'config', 'mcp_config.json'), JSON.stringify({ mcpServers: { megalens: { serverUrl: 'old' } } }))
+  await writeFile(join(h4, '.gemini', 'config', 'mcp_config.json'), JSON.stringify({ mcpServers: { other: { serverUrl: 'https://other' }, megalens: { disabled: true, serverUrl: 'old' } } }))
   const o4 = makeCaptureStream()
   const er4 = makeCaptureStream()
   const p4 = makePromptScript(['y', 'n'])
   const r4 = await runSetupAntigravity([], { stdout: o4.stream, stderr: er4.stream, env: e4, home: h4, isTTY: true, promptOverride: p4.promptOverride })
-  const calls4 = await readStubCalls(l4)
-  check('antigravity existing server + replace y: runs remove then add with new token',
+  const agy4After = JSON.parse(await readFile(join(h4, '.gemini', 'config', 'mcp_config.json'), 'utf-8'))
+  check('antigravity existing server + update y: writes directly at 0600, preserves disabled & other servers, 0 child calls',
     r4.exitCode === 0 &&
     r4.connected === true &&
-    calls4.length === 2 &&
-    calls4[0].argv.join(' ') === 'mcp remove megalens' &&
-    calls4[1].argv[1] === 'add' &&
-    calls4[1].argv[3] === `Authorization: Bearer ${TOKEN_B}` &&
+    (await readStubCalls(l4)).length === 0 &&
+    agy4After.mcpServers.other.serverUrl === 'https://other' &&
+    agy4After.mcpServers.megalens.disabled === true &&
+    agy4After.mcpServers.megalens.serverUrl === 'https://megalens.ai/api/mcp?ide=antigravity' &&
+    agy4After.mcpServers.megalens.headers.Authorization === `Bearer ${TOKEN_B}` &&
     !o4.text().includes(SECRET_PART_B))
 }
 
@@ -671,10 +695,10 @@ async function readStubCalls(stubLog) {
     home: hc,
     isTTY: true,
   })
-  check('Ctrl-C at Consent 1 exits 130 with no stub add and no CLAUDE.md prompt',
+  check('Ctrl-C at Consent 1 exits 130 with 0 child calls and no CLAUDE.md prompt',
     rc.exitCode === 130 &&
     !bufc.includes('CLAUDE.md') &&
-    (await readStubCalls(lc)).every((c) => c.argv[1] === 'get'))
+    (await readStubCalls(lc)).length === 0)
 }
 
 // ── 12. --remove-line across claude-code, antigravity, and codex ──────────────
@@ -836,204 +860,67 @@ async function readStubCalls(stubLog) {
     !badTargetTok.stderr.includes(SECRET_PART_A))
 }
 
-// ── 15. P2-1: replace remove=0 then add=1 prints recovery instructions ─────────
+// ── 15 & 16. Astra FINAL #2, #3, #9: no child-process bearer, git-safe backup, default-label required ─
 {
-  const { home, stubLog, env } = await newCaseEnv('claude', {
-    STUB_GET_EXIT: '0',
-    STUB_REMOVE_EXIT: '0',
-    STUB_ADD_EXIT: '1',
-    MEGALENS_TOKEN: TOKEN_B,
-  })
-  const out = makeCaptureStream()
-  const err = makeCaptureStream()
-  const { promptOverride } = makePromptScript(['y'])
-  const res = await runSetupClaudeCode([], {
-    stdout: out.stream,
-    stderr: err.stream,
-    env,
-    home,
-    isTTY: true,
-    promptOverride,
-  })
-  const calls = await readStubCalls(stubLog)
-  check('P2-1 claude-code replace remove=0 add=1: exits 1, explains previous entry was removed + masked add command',
-    res.exitCode === 1 &&
-    !res.connected &&
-    calls.length === 3 &&
-    err.text().includes('The previous MegaLens entry was removed. To add it again, run:') &&
-    err.text().includes('claude mcp add --scope user --transport http megalens') &&
-    err.text().includes('ml_tok_****') &&
-    !err.text().includes(SECRET_PART_B) &&
-    !out.text().includes(SECRET_PART_B))
-}
+  // #9: setup claude-code and setup antigravity refuse github-action, missing label, invalid, and network errors
+  for (const [hostLabel, fn, cfgRel] of [
+    ['claude-code', runSetupClaudeCode, '.claude.json'],
+    ['antigravity', runSetupAntigravity, join('.gemini', 'config', 'mcp_config.json')],
+  ]) {
+    for (const [reasonLabel, validator] of [
+      ['github-action token', async () => ({ ok: false, reason: 'wrong_label', label: 'github-action' })],
+      ['unlabeled token', async () => ({ ok: false, reason: 'wrong_label', label: null })],
+      ['invalid token', async () => ({ ok: false, reason: 'invalid', error: 'revoked' })],
+      ['network error', async () => ({ ok: false, reason: 'network', error: 'offline' })],
+    ]) {
+      const { home, stubLog, env } = await newCaseEnv(hostLabel === 'claude-code' ? 'claude' : 'agy', { MEGALENS_TOKEN: TOKEN_A })
+      const out = makeCaptureStream()
+      const err = makeCaptureStream()
+      const res = await fn([], {
+        stdout: out.stream,
+        stderr: err.stream,
+        env,
+        home,
+        isTTY: true,
+        validateToken: validator,
+        promptOverride: makePromptScript([]).promptOverride,
+      })
+      const cfgExists = await stat(join(home, cfgRel)).then(() => true, () => false)
+      check(`Astra FINAL #9 (${hostLabel}): refuses ${reasonLabel}, writes nothing, 0 child calls`,
+        res.exitCode === 1 && !res.connected && !cfgExists && (await readStubCalls(stubLog)).length === 0)
+    }
+  }
 
-// ── 16. P2-3: timeouts on get/add/remove + progress msg + strip MEGALENS_* ────
-{
-  // Checking message printed before get + MEGALENS_* stripped from child env
-  const { home: h0, stubLog: l0, env: e0 } = await newCaseEnv('claude', {
-    MEGALENS_TOKEN: TOKEN_A,
-    MEGALENS_CUSTOM_SECRET: 'do-not-pass',
-  })
-  const o0 = makeCaptureStream()
-  const er0 = makeCaptureStream()
-  const p0 = makePromptScript(['y', 'n'])
-  const r0 = await runSetupClaudeCode([], { stdout: o0.stream, stderr: er0.stream, env: e0, home: h0, isTTY: true, promptOverride: p0.promptOverride })
-  const calls0 = await readStubCalls(l0)
-  check('P2-3 prints checking message before get and strips all MEGALENS_* from child env',
-    r0.exitCode === 0 &&
-    o0.text().includes('Checking whether Claude Code already has MegaLens...') &&
-    calls0.length === 2 &&
-    calls0.every((c) => Array.isArray(c.megalensEnvKeys) && c.megalensEnvKeys.length === 0))
-
-  // Timeout on get -> treated as unknown -> tells user -> asks add question and proceeds on y
-  const { home: h1, stubLog: l1, env: e1 } = await newCaseEnv('claude', {
-    MEGALENS_TOKEN: TOKEN_A,
-    STUB_GET_SLEEP_MS: '5000',
-  })
-  const o1 = makeCaptureStream()
-  const er1 = makeCaptureStream()
-  const p1 = makePromptScript(['y', 'n'])
-  const r1 = await runSetupClaudeCode([], {
-    stdout: o1.stream,
-    stderr: er1.stream,
-    env: e1,
-    home: h1,
+  // #3: git-ignored Antigravity config inside a dotfiles repo stores backup outside the worktree
+  const { home: hDot, env: eDot } = await newCaseEnv('agy', { MEGALENS_TOKEN: TOKEN_B })
+  const dots = join(hDot, 'dotfiles')
+  const stateDir = join(hDot, 'ext-state')
+  await mkdir(join(dots, '.gemini', 'config'), { recursive: true })
+  spawnSync('git', ['init', '-q', dots])
+  await writeFile(join(dots, '.gitignore'), '.gemini/config/mcp_config.json\n')
+  const prior = JSON.stringify({ mcpServers: { other: { headers: { Authorization: 'Bearer sk-other' } } } })
+  await writeFile(join(dots, '.gemini', 'config', 'mcp_config.json'), prior)
+  await symlink(join(dots, '.gemini'), join(hDot, '.gemini'))
+  const oDot = makeCaptureStream()
+  const erDot = makeCaptureStream()
+  const rDot = await runSetupAntigravity([], {
+    stdout: oDot.stream,
+    stderr: erDot.stream,
+    env: { ...eDot, PATH: process.env.PATH ?? '', XDG_STATE_HOME: stateDir },
+    home: hDot,
     isTTY: true,
-    promptOverride: p1.promptOverride,
-    cliTimeouts: { get: 100, mutate: 1000 },
+    promptOverride: makePromptScript(['y', 'n']).promptOverride,
+    now: () => new Date('2026-11-22T07:10:00.000Z'),
   })
-  const calls1 = await readStubCalls(l1)
-  check('P2-3 timeout on get: tells user, treats as unknown, asks add question and connects on y',
-    r1.exitCode === 0 &&
-    r1.connected === true &&
-    o1.text().toLowerCase().includes('timed out') &&
-    o1.text().toLowerCase().includes('unknown') &&
-    p1.prompts.some((p) => p.prompt.includes('Add MegaLens to Claude Code? (y/N):')) &&
-    calls1.some((c) => c.argv[1] === 'add'))
-
-  // Timeout on add -> exits 1, no success message, prints P1-1 recovery text without token
-  const { home: h2, env: e2 } = await newCaseEnv('claude', {
-    MEGALENS_TOKEN: TOKEN_A,
-    STUB_ADD_SLEEP_MS: '5000',
-  })
-  const o2 = makeCaptureStream()
-  const er2 = makeCaptureStream()
-  const p2 = makePromptScript(['y'])
-  const r2 = await runSetupClaudeCode([], {
-    stdout: o2.stream,
-    stderr: er2.stream,
-    env: e2,
-    home: h2,
-    isTTY: true,
-    promptOverride: p2.promptOverride,
-    cliTimeouts: { get: 1000, mutate: 100 },
-  })
-  check('P2-3 / P1-1 timeout on add (claude-code): exits 1, recovery path printed, no success message, no token',
-    r2.exitCode === 1 &&
-    !r2.connected &&
-    er2.text().toLowerCase().includes('timed out') &&
-    er2.text().includes('This may or may not have finished.') &&
-    er2.text().includes('claude mcp get megalens') &&
-    er2.text().includes('To add it again, run:') &&
-    er2.text().includes('claude mcp add --scope user --transport http megalens') &&
-    er2.text().includes('ml_tok_****') &&
-    !er2.text().includes(SECRET_PART_A) &&
-    !o2.text().includes(SECRET_PART_A) &&
-    !o2.text().includes('Connected MegaLens') &&
-    !o2.text().includes('Restart Claude Code'))
-
-  // Timeout on remove -> exits 1, add not called, no success message, prints P1-1 recovery text without token
-  const { home: h3, stubLog: l3, env: e3 } = await newCaseEnv('claude', {
-    MEGALENS_TOKEN: TOKEN_A,
-    STUB_GET_EXIT: '0',
-    STUB_REMOVE_SLEEP_MS: '5000',
-  })
-  const o3 = makeCaptureStream()
-  const er3 = makeCaptureStream()
-  const p3 = makePromptScript(['y'])
-  const r3 = await runSetupClaudeCode([], {
-    stdout: o3.stream,
-    stderr: er3.stream,
-    env: e3,
-    home: h3,
-    isTTY: true,
-    promptOverride: p3.promptOverride,
-    cliTimeouts: { get: 1000, mutate: 100 },
-  })
-  const calls3 = await readStubCalls(l3)
-  check('P2-3 / P1-1 timeout on remove (claude-code): exits 1, add not called, recovery path printed, no token',
-    r3.exitCode === 1 &&
-    !r3.connected &&
-    calls3.every((c) => c.argv[1] !== 'add') &&
-    er3.text().toLowerCase().includes('timed out') &&
-    er3.text().includes('This may or may not have finished.') &&
-    er3.text().includes('claude mcp get megalens') &&
-    er3.text().includes('To add it again, run:') &&
-    er3.text().includes('claude mcp add --scope user --transport http megalens') &&
-    er3.text().includes('ml_tok_****') &&
-    !er3.text().includes(SECRET_PART_A) &&
-    !o3.text().includes(SECRET_PART_A) &&
-    !o3.text().includes('Connected MegaLens') &&
-    !o3.text().includes('Restart Claude Code'))
-
-  // P1-1 Timeout on add & remove for agy
-  const { home: h4, env: e4 } = await newCaseEnv('agy', {
-    MEGALENS_TOKEN: TOKEN_A,
-    STUB_ADD_SLEEP_MS: '5000',
-  })
-  const o4 = makeCaptureStream()
-  const er4 = makeCaptureStream()
-  const p4 = makePromptScript(['y'])
-  const r4 = await runSetupAntigravity([], {
-    stdout: o4.stream,
-    stderr: er4.stream,
-    env: e4,
-    home: h4,
-    isTTY: true,
-    promptOverride: p4.promptOverride,
-    cliTimeouts: { get: 1000, mutate: 100 },
-  })
-  check('P1-1 timeout on add (agy): exits 1, prints agy mcp list + masked add command, no token',
-    r4.exitCode === 1 &&
-    !r4.connected &&
-    er4.text().includes('This may or may not have finished.') &&
-    er4.text().includes('agy mcp list') &&
-    er4.text().includes('To add it again, run:') &&
-    er4.text().includes('agy mcp add --header') &&
-    er4.text().includes('ml_tok_****') &&
-    !er4.text().includes(SECRET_PART_A) &&
-    !o4.text().includes(SECRET_PART_A))
-
-  const { home: h5, stubLog: l5, env: e5 } = await newCaseEnv('agy', {
-    MEGALENS_TOKEN: TOKEN_A,
-    STUB_REMOVE_SLEEP_MS: '5000',
-  })
-  await mkdir(join(h5, '.gemini', 'config'), { recursive: true })
-  await writeFile(join(h5, '.gemini', 'config', 'mcp_config.json'), JSON.stringify({ mcpServers: { megalens: { serverUrl: 'old' } } }))
-  const o5 = makeCaptureStream()
-  const er5 = makeCaptureStream()
-  const p5 = makePromptScript(['y'])
-  const r5 = await runSetupAntigravity([], {
-    stdout: o5.stream,
-    stderr: er5.stream,
-    env: e5,
-    home: h5,
-    isTTY: true,
-    promptOverride: p5.promptOverride,
-    cliTimeouts: { get: 1000, mutate: 100 },
-  })
-  const calls5 = await readStubCalls(l5)
-  check('P1-1 timeout on remove (agy): exits 1, add not called, prints agy mcp list + masked add command, no token',
-    r5.exitCode === 1 &&
-    !r5.connected &&
-    calls5.every((c) => c.argv[1] !== 'add') &&
-    er5.text().includes('This may or may not have finished.') &&
-    er5.text().includes('agy mcp list') &&
-    er5.text().includes('To add it again, run:') &&
-    er5.text().includes('agy mcp add --header') &&
-    er5.text().includes('ml_tok_****') &&
-    !er5.text().includes(SECRET_PART_A) &&
-    !o5.text().includes(SECRET_PART_A))
+  const dotFiles = await readdir(join(dots, '.gemini', 'config'))
+  const gitSt = spawnSync('git', ['-C', dots, 'status', '--porcelain'], { encoding: 'utf-8' }).stdout
+  const extBaks = await readdir(join(stateDir, 'megalens', 'backups')).catch(() => [])
+  check('Astra FINAL #3 (antigravity): backup of git-ignored config stays outside dotfiles repo',
+    rDot.exitCode === 0 &&
+    rDot.connected === true &&
+    !dotFiles.some((f) => f.includes('.bak-')) &&
+    !gitSt.includes('.bak-') &&
+    extBaks.some((f) => f.startsWith('mcp_config.json.') && f.includes('.bak-')))
 }
 
 // ── 17. P2-4 & P3: agy unrecognised top-level key ("unknown") & UTF-8 BOM ─────
@@ -1052,7 +939,7 @@ async function readStubCalls(stubLog) {
     !r1.connected &&
     o1.text().toLowerCase().includes('unknown') &&
     p1.prompts.some((p) => p.prompt.includes('Add MegaLens to Antigravity? (y/N):')) &&
-    !p1.prompts.some((p) => p.prompt.includes('Replace existing')) &&
+    !p1.prompts.some((p) => p.prompt.includes('Update MegaLens')) &&
     calls1.length === 0)
 
   // UTF-8 BOM in mcp_config.json -> stripped before JSON.parse and existing entry detected
@@ -1066,24 +953,25 @@ async function readStubCalls(stubLog) {
   check('P3 agy UTF-8 BOM in mcp_config.json: parsed cleanly and existing megalens entry detected',
     r2.exitCode === 0 &&
     (await readStubCalls(l2)).length === 0 &&
-    p2.prompts.some((p) => p.prompt.includes('Replace existing MegaLens MCP server in Antigravity? (y/N):')))
+    p2.prompts.some((p) => p.prompt.includes('Update MegaLens MCP server in Antigravity? (y/N):')))
 }
 
 // ── 18. P3: dry-run previews, --remove-line --dry-run, dangling symlink ───────
 {
-  // setup claude-code --dry-run mentions "would check for an existing server"
+  // setup claude-code --dry-run previews config path without modifying files or spawning child processes
   const { home: h1, stubLog: l1, env: e1 } = await newCaseEnv('claude', { MEGALENS_TOKEN: TOKEN_A })
   const o1 = makeCaptureStream()
   const er1 = makeCaptureStream()
-  const p1 = makePromptScript(['n', 'n'])
+  const p1 = makePromptScript(['y', 'n'])
   const r1 = await runSetupClaudeCode(['--dry-run'], { stdout: o1.stream, stderr: er1.stream, env: e1, home: h1, isTTY: true, promptOverride: p1.promptOverride })
-  check('P3 setup claude-code --dry-run preview says would check for an existing server',
+  check('P3 setup claude-code --dry-run preview shows [dry-run] Would write ~/.claude.json without modifying anything',
     r1.exitCode === 0 &&
     r1.dryRun === true &&
     (await readStubCalls(l1)).length === 0 &&
-    o1.text().includes('would check for an existing server'))
+    o1.text().includes(`[dry-run] Would write ${join(h1, '.claude.json')}`) &&
+    !o1.text().includes(SECRET_PART_A))
 
-  // replace + --dry-run (antigravity)
+  // update + --dry-run (antigravity)
   const { home: h2, stubLog: l2, env: e2 } = await newCaseEnv('agy', { MEGALENS_TOKEN: TOKEN_B })
   await mkdir(join(h2, '.gemini', 'config'), { recursive: true })
   const cfgPath2 = join(h2, '.gemini', 'config', 'mcp_config.json')
@@ -1093,14 +981,13 @@ async function readStubCalls(stubLog) {
   const er2 = makeCaptureStream()
   const p2 = makePromptScript(['y', 'n'])
   const r2 = await runSetupAntigravity(['--dry-run'], { stdout: o2.stream, stderr: er2.stream, env: e2, home: h2, isTTY: true, promptOverride: p2.promptOverride })
-  check('P3 replace + --dry-run: exits 0, runs 0 stub calls, previews remove and masked add',
+  check('P3 update + --dry-run: exits 0, runs 0 stub calls, previews masked write without touching file',
     r2.exitCode === 0 &&
     r2.dryRun === true &&
     !r2.connected &&
     (await readStubCalls(l2)).length === 0 &&
     (await readFile(cfgPath2, 'utf-8')) === cfgContent2 &&
-    o2.text().includes('[dry-run] Would run: agy mcp remove megalens') &&
-    o2.text().includes('[dry-run] Would run: agy mcp add') &&
+    o2.text().includes(`[dry-run] Would write ${cfgPath2}`) &&
     !o2.text().includes(SECRET_PART_B))
 
   // --remove-line --dry-run (claude-code)
@@ -1181,62 +1068,28 @@ async function readStubCalls(stubLog) {
     !topTok.stderr.includes(SECRET_PART_A) &&
     topTok.stderr.includes('ml_tok_****'))
 
-  // P2-1: bash wrapper running `sleep 40` as a grandchild is killed with process group on get timeout
-  const { dir: dPg, home: hPg, env: ePg } = await newCaseEnv('claude', { MEGALENS_TOKEN: TOKEN_A })
-  const pgBinDir = join(dPg, 'pg-bin')
-  await mkdir(pgBinDir, { recursive: true })
-  const pgClaude = join(pgBinDir, 'claude')
-  await writeFile(pgClaude, '#!/usr/bin/env bash\nsleep 40\n', { mode: 0o755 })
-  await chmod(pgClaude, 0o755)
-  const oPg = makeCaptureStream()
-  const erPg = makeCaptureStream()
-  const pPg = makePromptScript(['n', 'n'])
-  const t0 = Date.now()
-  const rPg = await runSetupClaudeCode([], {
-    stdout: oPg.stream,
-    stderr: erPg.stream,
-    env: { ...ePg, PATH: `${pgBinDir}${delimiter}${process.env.PATH ?? '/usr/bin:/bin'}` },
-    home: hPg,
-    isTTY: true,
-    promptOverride: pPg.promptOverride,
-    cliTimeouts: { get: 200, mutate: 1000 },
-  })
-  const elapsedPg = Date.now() - t0
-  check('P2-1 bash stub with sleep 40 grandchild: get timeout fires within ~timeout+3s',
-    rPg.exitCode === 0 &&
-    elapsedPg < 3200 &&
-    oPg.text().toLowerCase().includes('timed out') &&
-    oPg.text().toLowerCase().includes('unknown'))
-
-  // P2-2: token prompt runs BEFORE `claude mcp get` and BEFORE reading agy config
-  const { home: hOrd, stubLog: lOrd, env: eOrd } = await newCaseEnv('claude')
-  const oOrd = makeCaptureStream()
-  const erOrd = makeCaptureStream()
-  let plainIdx = 0
-  const plainAnswers = ['n', 'n']
+  // P2-2: token prompt runs BEFORE reading .claude.json and BEFORE reading agy config
+  const { home: hOrd, env: eOrd } = await newCaseEnv('claude')
+  await writeFile(join(hOrd, '.claude.json'), '{ invalid json')
+  let claudeAskedHidden = false
   const rOrd = await runSetupClaudeCode([], {
-    stdout: oOrd.stream,
-    stderr: erOrd.stream,
+    stdout: makeCaptureStream().stream,
+    stderr: makeCaptureStream().stream,
     env: eOrd,
     home: hOrd,
     isTTY: true,
     promptOverride: {
       async askHidden() {
-        await appendFile(lOrd, JSON.stringify({ event: 'askHidden' }) + '\n', 'utf-8')
+        claudeAskedHidden = true
         return TOKEN_A
       },
       async askPlain() {
-        return plainAnswers[plainIdx++]
+        throw new Error('unexpected plain prompt')
       },
     },
   })
-  const ordEvents = await readStubCalls(lOrd)
-  check('P2-2 token prompt runs BEFORE claude mcp get',
-    rOrd.exitCode === 0 &&
-    ordEvents.length >= 2 &&
-    ordEvents[0].event === 'askHidden' &&
-    ordEvents[1].bin === 'claude' &&
-    ordEvents[1].argv.join(' ') === 'mcp get megalens')
+  check('P2-2 (claude-code) token prompt runs BEFORE reading .claude.json',
+    rOrd.exitCode === 1 && claudeAskedHidden === true)
 
   // P2-2 (agy): token prompt runs BEFORE reading agy mcp_config.json
   const { home: hOrdAgy, env: eOrdAgy } = await newCaseEnv('agy')
@@ -1262,14 +1115,15 @@ async function readStubCalls(stubLog) {
   check('P2-2 (agy) token prompt runs BEFORE reading mcp_config.json',
     rOrdAgy.exitCode === 1 && agyAskedHidden === true)
 
-  // P2-3: CLAUDE_CONFIG_DIR honoured for setup and --remove-line
+  // P2-3: CLAUDE_CONFIG_DIR honoured for .claude.json, CLAUDE.md and --remove-line
   const { dir: dCfg, home: hCfg, env: eCfg } = await newCaseEnv('claude', { MEGALENS_TOKEN: TOKEN_A })
   const customClaudeDir = join(dCfg, 'custom-claude-cfg')
+  const customClaudeCfg = join(customClaudeDir, '.claude.json')
   const customClaudeMd = join(customClaudeDir, 'CLAUDE.md')
   const defaultClaudeMd = join(hCfg, '.claude', 'CLAUDE.md')
   const oCfg1 = makeCaptureStream()
   const erCfg1 = makeCaptureStream()
-  const pCfg1 = makePromptScript(['n', 'y'])
+  const pCfg1 = makePromptScript(['y', 'y'])
   const rCfg1 = await runSetupClaudeCode([], {
     stdout: oCfg1.stream,
     stderr: erCfg1.stream,
@@ -1280,11 +1134,15 @@ async function readStubCalls(stubLog) {
     now: () => new Date('2026-11-16T12:00:00.000Z'),
   })
   const defaultExistsAfterSetup = await stat(defaultClaudeMd).then(() => true, () => false)
-  check('P2-3 CLAUDE_CONFIG_DIR honoured in setup: writes $CLAUDE_CONFIG_DIR/CLAUDE.md',
+  const defaultCfgExistsAfterSetup = await stat(join(hCfg, '.claude.json')).then(() => true, () => false)
+  check('P2-3 CLAUDE_CONFIG_DIR honoured in setup: writes $CLAUDE_CONFIG_DIR/.claude.json and $CLAUDE_CONFIG_DIR/CLAUDE.md',
     rCfg1.exitCode === 0 &&
+    rCfg1.written.includes(customClaudeCfg) &&
     rCfg1.written.includes(customClaudeMd) &&
+    JSON.parse(await readFile(customClaudeCfg, 'utf-8')).mcpServers.megalens.headers.Authorization === `Bearer ${TOKEN_A}` &&
     (await readFile(customClaudeMd, 'utf-8')) === `${MEGALENS_REVIEW_LINE}\n${DECISION_LINE}\n` &&
-    !defaultExistsAfterSetup)
+    !defaultExistsAfterSetup &&
+    !defaultCfgExistsAfterSetup)
 
   const oCfg2 = makeCaptureStream()
   const erCfg2 = makeCaptureStream()
@@ -1303,46 +1161,6 @@ async function readStubCalls(stubLog) {
     rCfg2.written.includes(customClaudeMd) &&
     (await readFile(customClaudeMd, 'utf-8')) === '' &&
     !defaultExistsAfterSetup)
-
-  // P2-4: existing project/local-scoped megalens entry -> continues to CLAUDE.md, exits 0 on decline and accept
-  for (const [label, lineAnswer, expectWritten] of [
-    ['declines CLAUDE.md', 'n', false],
-    ['completes CLAUDE.md', 'y', true],
-  ]) {
-    const { home: hProj, stubLog: lProj, env: eProj } = await newCaseEnv('claude', {
-      MEGALENS_TOKEN: TOKEN_B,
-      STUB_GET_EXIT: '0',
-      STUB_REMOVE_EXIT: '1',
-      STUB_REMOVE_STDERR: 'No MCP server named "megalens" in user scope\n',
-    })
-    const oProj = makeCaptureStream()
-    const erProj = makeCaptureStream()
-    const pProj = makePromptScript(['y', lineAnswer])
-    const rProj = await runSetupClaudeCode([], {
-      stdout: oProj.stream,
-      stderr: erProj.stream,
-      env: eProj,
-      home: hProj,
-      isTTY: true,
-      promptOverride: pProj.promptOverride,
-      now: () => new Date('2026-11-16T12:00:00.000Z'),
-    })
-    const callsProj = await readStubCalls(lProj)
-    const mdPathProj = join(hProj, '.claude', 'CLAUDE.md')
-    const mdWritten = expectWritten
-      ? (await readFile(mdPathProj, 'utf-8').catch(() => '')) === `${MEGALENS_REVIEW_LINE}\n${DECISION_LINE}\n`
-      : !(await stat(mdPathProj).then(() => true, () => false))
-    check(`P2-4 project/local-scoped megalens entry (${label}): continues to CLAUDE.md and exits 0`,
-      rProj.exitCode === 0 &&
-      !rProj.connected &&
-      callsProj.length === 2 &&
-      callsProj.every((c) => c.argv[1] !== 'add') &&
-      oProj.text().includes("this folder's project settings") &&
-      oProj.text().includes('Nothing was changed') &&
-      oProj.text().includes('another folder') &&
-      pProj.prompts.some((p) => p.prompt.includes('CLAUDE.md')) &&
-      mdWritten)
-  }
 
   // P2-5: agy config with recognised mcpServers + extra top-level key -> absent, no "unknown" warning
   const { home: hAgyK, stubLog: lAgyK, env: eAgyK } = await newCaseEnv('agy', { MEGALENS_TOKEN: TOKEN_A })
@@ -1364,7 +1182,7 @@ async function readStubCalls(stubLog) {
     !oAgyK.text().toLowerCase().includes('unknown') &&
     !erAgyK.text().toLowerCase().includes('unknown') &&
     pAgyK.prompts.some((p) => p.prompt.includes('Add MegaLens to Antigravity? (y/N):')) &&
-    !pAgyK.prompts.some((p) => p.prompt.includes('Replace existing')) &&
+    !pAgyK.prompts.some((p) => p.prompt.includes('Update MegaLens')) &&
     (await readStubCalls(lAgyK)).length === 0)
 }
 
@@ -1759,6 +1577,368 @@ async function readStubCalls(stubLog) {
       out.text().includes(`- ${MEGALENS_REVIEW_LINE}`) &&
       out.text().includes(`- ${DECISION_LINE_V1}`) &&
       out.text().includes(`- ${DECISION_LINE}`))
+  }
+}
+
+// ── 22. Fix round 11 (Astra CONFIRM10 #11 concurrent edits & #13 tool-specific onboarding labels) ─
+{
+  // #11a: Unrelated MCP server added to Claude Code and Antigravity configs while confirmation prompt is open -> preserved
+  for (const [hostLabel, fn, cfgRel, urlField] of [
+    ['claude-code', runSetupClaudeCode, '.claude.json', 'url'],
+    ['antigravity', runSetupAntigravity, join('.gemini', 'config', 'mcp_config.json'), 'serverUrl'],
+  ]) {
+    const { home, env } = await newCaseEnv(hostLabel === 'claude-code' ? 'claude' : 'agy', { MEGALENS_TOKEN: TOKEN_A })
+    const cfgPath = join(home, cfgRel)
+    await mkdir(dirname(cfgPath), { recursive: true })
+    await writeFile(cfgPath, JSON.stringify({ mcpServers: { first: { [urlField]: 'https://first.example' } } }))
+    let edited = false
+    const res = await fn([], {
+      stdout: makeCaptureStream().stream,
+      stderr: makeCaptureStream().stream,
+      env,
+      home,
+      isTTY: true,
+      promptOverride: {
+        async askHidden() { throw new Error('unexpected') },
+        async askPlain(prompt) {
+          if (!edited && prompt.includes('Add MegaLens to')) {
+            edited = true
+            // Simulate concurrent addition of a second MCP server while prompt is open
+            await writeFile(cfgPath, JSON.stringify({
+              mcpServers: {
+                first: { [urlField]: 'https://first.example' },
+                second: { [urlField]: 'https://second.example' },
+              },
+            }))
+            return 'y'
+          }
+          return 'n'
+        },
+      },
+    })
+    const after = JSON.parse(await readFile(cfgPath, 'utf-8'))
+    check(`Astra CONFIRM10 #11 (${hostLabel}): adding a second MCP server while prompt is open is preserved`,
+      res.exitCode === 0 &&
+      res.connected === true &&
+      after.mcpServers.first?.[urlField] === 'https://first.example' &&
+      after.mcpServers.second?.[urlField] === 'https://second.example' &&
+      after.mcpServers.megalens?.headers?.Authorization === `Bearer ${TOKEN_A}`)
+
+    // #11b: Conflicting concurrent edit to mcpServers.megalens while prompt is open -> refused (exit 1), untouched
+    const { home: hc, env: ec } = await newCaseEnv(hostLabel === 'claude-code' ? 'claude' : 'agy', { MEGALENS_TOKEN: TOKEN_A })
+    const cfgPathC = join(hc, cfgRel)
+    await mkdir(dirname(cfgPathC), { recursive: true })
+    await writeFile(cfgPathC, JSON.stringify({ mcpServers: {} }))
+    const concurrentContent = JSON.stringify({
+      mcpServers: {
+        megalens: { [urlField]: 'https://megalens.ai/api/mcp', headers: { Authorization: `Bearer ${TOKEN_B}` } },
+      },
+    })
+    const errC = makeCaptureStream()
+    const resC = await fn([], {
+      stdout: makeCaptureStream().stream,
+      stderr: errC.stream,
+      env: ec,
+      home: hc,
+      isTTY: true,
+      promptOverride: {
+        async askHidden() { throw new Error('unexpected') },
+        async askPlain(prompt) {
+          if (prompt.includes('Add MegaLens to')) {
+            await writeFile(cfgPathC, concurrentContent)
+            return 'y'
+          }
+          return 'n'
+        },
+      },
+    })
+    check(`Astra CONFIRM10 #11 (${hostLabel}): conflicting edit to mcpServers.megalens while prompt is open exits 1 and leaves file untouched`,
+      resC.exitCode === 1 &&
+      !resC.connected &&
+      (await readFile(cfgPathC, 'utf-8')) === concurrentContent &&
+      errC.text().includes('conflicting edit'))
+  }
+
+  // #13: Onboarding tool-specific labels (`claude-code`, `antigravity`) accepted by their own installer, rejected by other installers
+  const { validateEditorToken, readOptionalFile, writeFileAtomicPreservingMode } = await import('../bin/setup-shared.mjs')
+  const makeLabelFetch = (label) => async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ valid: true, is_pro: false, is_payg: true, plan_code: 'payg', label }),
+  })
+  for (const [hostLabel, rawFn, cfgRel, ownLabel, wrongLabel] of [
+    ['claude-code', rawRunSetupClaudeCode, '.claude.json', 'claude-code', 'codex'],
+    ['antigravity', rawRunSetupAntigravity, join('.gemini', 'config', 'mcp_config.json'), 'antigravity', 'claude-code'],
+  ]) {
+    const { home: hOk, env: eOk } = await newCaseEnv(hostLabel === 'claude-code' ? 'claude' : 'agy', { MEGALENS_TOKEN: TOKEN_A })
+    const rOk = await rawFn([], {
+      stdout: makeCaptureStream().stream,
+      stderr: makeCaptureStream().stream,
+      env: eOk,
+      home: hOk,
+      isTTY: true,
+      promptOverride: makePromptScript(['y', 'n']).promptOverride,
+      validateToken: (tok, opts) => validateEditorToken(tok, { ...opts, fetchImpl: makeLabelFetch(ownLabel) }),
+    })
+    const cfgOk = JSON.parse(await readFile(join(hOk, cfgRel), 'utf-8'))
+    check(`Astra CONFIRM10 #13 (${hostLabel}): accepts onboarding token with verified label "${ownLabel}"`,
+      rOk.exitCode === 0 &&
+      rOk.connected === true &&
+      cfgOk.mcpServers.megalens.headers.Authorization === `Bearer ${TOKEN_A}`)
+
+    const { home: hBad, env: eBad } = await newCaseEnv(hostLabel === 'claude-code' ? 'claude' : 'agy', { MEGALENS_TOKEN: TOKEN_A })
+    const errBad = makeCaptureStream()
+    const rBad = await rawFn([], {
+      stdout: makeCaptureStream().stream,
+      stderr: errBad.stream,
+      env: eBad,
+      home: hBad,
+      isTTY: true,
+      promptOverride: makePromptScript(['y', 'n']).promptOverride,
+      validateToken: (tok, opts) => validateEditorToken(tok, { ...opts, fetchImpl: makeLabelFetch(wrongLabel) }),
+    })
+    const existsBad = await readFile(join(hBad, cfgRel), 'utf-8').then(() => true, () => false)
+    check(`Astra CONFIRM10 #13 (${hostLabel}): rejects mismatched tool label "${wrongLabel}" with exit 1 and zero writes`,
+      rBad.exitCode === 1 && !existsBad && errBad.text().includes(`"${ownLabel}"`))
+  }
+
+  // ── 23. Fix round 12 (Astra CONFIRM11 #11 concurrent edit during backup & #12 headersHelper) ──
+  // #11a: Saving a second server WHILE backupExistingFile is running (simulated via a git shim on
+  // the 2nd git invocation, which runs inside backupExistingFile AFTER the post-prompt read) MUST
+  // be preserved rather than erased.
+  for (const [hostLabel, fn, cfgRel, urlField] of [
+    ['claude-code', runSetupClaudeCode, '.claude.json', 'url'],
+    ['antigravity', runSetupAntigravity, join('.gemini', 'config', 'mcp_config.json'), 'serverUrl'],
+  ]) {
+    const { dir, home, env } = await newCaseEnv(hostLabel === 'claude-code' ? 'claude' : 'agy', { MEGALENS_TOKEN: TOKEN_A })
+    const cfgPath = join(home, cfgRel)
+    await mkdir(dirname(cfgPath), { recursive: true })
+    await writeFile(cfgPath, JSON.stringify({ mcpServers: { first: { [urlField]: 'https://first.example' } } }))
+
+    const shimBin = join(dir, 'git-shim')
+    await mkdir(shimBin, { recursive: true })
+    const countFile = join(dir, 'git-count')
+    const secondPayload = JSON.stringify({
+      mcpServers: {
+        first: { [urlField]: 'https://first.example' },
+        second: { [urlField]: 'https://second.example' },
+      },
+    })
+    const shimScript = [
+      `#!${process.execPath}`,
+      "import { readFileSync, writeFileSync } from 'node:fs'",
+      `const countFile = ${JSON.stringify(countFile)}`,
+      `const cfgPath = ${JSON.stringify(cfgPath)}`,
+      `const payload = ${JSON.stringify(secondPayload)}`,
+      'let n = 0',
+      'try { n = Number(readFileSync(countFile, "utf-8").trim()) || 0 } catch {}',
+      'n += 1',
+      'writeFileSync(countFile, String(n))',
+      '// 1st git call is gitTrackable(realCfg); 2nd is inside backupExistingFile!',
+      'if (n === 2) writeFileSync(cfgPath, payload)',
+      'process.stderr.write("fatal: not a git repository\\n")',
+      'process.exit(128)',
+      '',
+    ].join('\n')
+    await writeFile(join(shimBin, 'git'), shimScript, { mode: 0o755 })
+
+    const res = await fn([], {
+      stdout: makeCaptureStream().stream,
+      stderr: makeCaptureStream().stream,
+      env: { ...env, PATH: `${shimBin}:${env.PATH ?? ''}` },
+      home,
+      isTTY: true,
+      promptOverride: makePromptScript(['y', 'n']).promptOverride,
+    })
+    const after = JSON.parse(await readFile(cfgPath, 'utf-8'))
+    check(`Astra CONFIRM11 #11 (${hostLabel}): second server saved during backup is preserved after recheck/re-merge`,
+      res.exitCode === 0 &&
+      res.connected === true &&
+      after.mcpServers.first?.[urlField] === 'https://first.example' &&
+      after.mcpServers.second?.[urlField] === 'https://second.example' &&
+      after.mcpServers.megalens?.headers?.Authorization === `Bearer ${TOKEN_A}`)
+
+    // #11b: Conflicting edit to mcpServers.megalens DURING backup -> refused (exit 1), concurrent edit untouched
+    const { dir: dirC, home: homeC, env: envC } = await newCaseEnv(hostLabel === 'claude-code' ? 'claude' : 'agy', { MEGALENS_TOKEN: TOKEN_A })
+    const cfgPathC = join(homeC, cfgRel)
+    await mkdir(dirname(cfgPathC), { recursive: true })
+    await writeFile(cfgPathC, JSON.stringify({ mcpServers: { first: { [urlField]: 'https://first.example' } } }))
+    const shimBinC = join(dirC, 'git-shim-c')
+    await mkdir(shimBinC, { recursive: true })
+    const countFileC = join(dirC, 'git-count-c')
+    const conflictPayload = JSON.stringify({
+      mcpServers: {
+        first: { [urlField]: 'https://first.example' },
+        megalens: { [urlField]: 'https://megalens.ai/api/mcp', headers: { Authorization: `Bearer ${TOKEN_B}` } },
+      },
+    })
+    const shimScriptC = [
+      `#!${process.execPath}`,
+      "import { readFileSync, writeFileSync } from 'node:fs'",
+      `const countFile = ${JSON.stringify(countFileC)}`,
+      `const cfgPath = ${JSON.stringify(cfgPathC)}`,
+      `const payload = ${JSON.stringify(conflictPayload)}`,
+      'let n = 0',
+      'try { n = Number(readFileSync(countFile, "utf-8").trim()) || 0 } catch {}',
+      'n += 1',
+      'writeFileSync(countFile, String(n))',
+      'if (n === 2) writeFileSync(cfgPath, payload)',
+      'process.stderr.write("fatal: not a git repository\\n")',
+      'process.exit(128)',
+      '',
+    ].join('\n')
+    await writeFile(join(shimBinC, 'git'), shimScriptC, { mode: 0o755 })
+
+    const errC = makeCaptureStream()
+    const resC = await fn([], {
+      stdout: makeCaptureStream().stream,
+      stderr: errC.stream,
+      env: { ...envC, PATH: `${shimBinC}:${envC.PATH ?? ''}` },
+      home: homeC,
+      isTTY: true,
+      promptOverride: makePromptScript(['y', 'n']).promptOverride,
+    })
+    check(`Astra CONFIRM11 #11 (${hostLabel}): conflicting megalens edit during backup exits 1 and leaves file untouched`,
+      resC.exitCode === 1 &&
+      !resC.connected &&
+      (await readFile(cfgPathC, 'utf-8')) === conflictPayload &&
+      errC.text().includes('conflicting edit'))
+  }
+
+  // #11c: Direct writeFileAtomicPreservingMode expectedVersion check refuses to replace a modified or newly created file
+  {
+    const { dir } = await newCaseEnv('claude')
+    const targetFile = join(dir, 'atomic-version.json')
+    await writeFile(targetFile, '{"v":1}\n')
+    const snap = await readOptionalFile(targetFile)
+    await writeFile(targetFile, '{"v":2}\n')
+    let caughtCode = null
+    try {
+      await writeFileAtomicPreservingMode(targetFile, '{"v":3}\n', {
+        defaultMode: 0o600,
+        preserveMode: false,
+        log: () => {},
+        expectedVersion: snap.version,
+      })
+    } catch (err) {
+      caughtCode = err?.code
+    }
+    const strays = (await readdir(dir)).filter((f) => f.includes('megalens-tmp'))
+    check('Astra CONFIRM11 #11: writeFileAtomicPreservingMode rejects stale expectedVersion with ECONCURRENT and cleans up temp',
+      caughtCode === 'ECONCURRENT' &&
+      (await readFile(targetFile, 'utf-8')) === '{"v":2}\n' &&
+      strays.length === 0)
+
+    const absentFile = join(dir, 'atomic-absent.json')
+    const absentSnap = await readOptionalFile(absentFile)
+    await writeFile(absentFile, '{"created":"concurrently"}\n')
+    let absentCode = null
+    try {
+      await writeFileAtomicPreservingMode(absentFile, '{"created":"setup"}\n', {
+        defaultMode: 0o600,
+        preserveMode: false,
+        log: () => {},
+        expectedVersion: absentSnap.version,
+      })
+    } catch (err) {
+      absentCode = err?.code
+    }
+    check('Astra CONFIRM11 #11: writeFileAtomicPreservingMode refuses to overwrite a file created after absent snapshot',
+      absentCode === 'ECONCURRENT' &&
+      (await readFile(absentFile, 'utf-8')) === '{"created":"concurrently"}\n')
+  }
+
+  // #12: Claude Code cross-origin update MUST drop headersHelper, oauth, auth, env, and static proxy headers;
+  // same-origin MegaLens update keeps headersHelper; mixed-origin drops it.
+  {
+    const { home: hH, env: eH } = await newCaseEnv('claude', { MEGALENS_TOKEN: TOKEN_B })
+    await writeFile(join(hH, '.claude.json'), JSON.stringify({
+      mcpServers: {
+        megalens: {
+          disabled: true,
+          type: 'http',
+          url: 'https://proxy.corp.example/mcp',
+          headersHelper: '/usr/local/bin/proxy-headers.sh',
+          oauth: { clientId: 'proxy-id', clientSecret: 'proxy-secret' },
+          authProvider: 'custom',
+          env: { PROXY_SECRET: 's3cr3t' },
+          headers: { 'X-Proxy-Api-Key': 'proxy-key-123' },
+        },
+      },
+    }))
+    const rH = await runSetupClaudeCode([], {
+      stdout: makeCaptureStream().stream,
+      stderr: makeCaptureStream().stream,
+      env: eH,
+      home: hH,
+      isTTY: true,
+      promptOverride: makePromptScript(['y', 'n']).promptOverride,
+    })
+    const afterH = JSON.parse(await readFile(join(hH, '.claude.json'), 'utf-8')).mcpServers.megalens
+    check('Astra CONFIRM11 #12 (claude-code): origin change drops headersHelper, oauth, authProvider, env, and old headers while keeping disabled',
+      rH.exitCode === 0 &&
+      afterH.url === CLAUDE_MCP_URL &&
+      afterH.disabled === true &&
+      !('headersHelper' in afterH) &&
+      !('oauth' in afterH) &&
+      !('authProvider' in afterH) &&
+      !('env' in afterH) &&
+      !('X-Proxy-Api-Key' in afterH.headers) &&
+      afterH.headers.Authorization === `Bearer ${TOKEN_B}`)
+
+    // Same-origin MegaLens entry preserves headersHelper
+    const { home: hSame, env: eSame } = await newCaseEnv('claude', { MEGALENS_TOKEN: TOKEN_B })
+    await writeFile(join(hSame, '.claude.json'), JSON.stringify({
+      mcpServers: {
+        megalens: {
+          type: 'http',
+          url: 'https://megalens.ai/api/mcp',
+          headersHelper: '/usr/local/bin/megalens-headers.sh',
+          headers: { 'X-Custom': '1' },
+        },
+      },
+    }))
+    const rSame = await runSetupClaudeCode([], {
+      stdout: makeCaptureStream().stream,
+      stderr: makeCaptureStream().stream,
+      env: eSame,
+      home: hSame,
+      isTTY: true,
+      promptOverride: makePromptScript(['y', 'n']).promptOverride,
+    })
+    const afterSame = JSON.parse(await readFile(join(hSame, '.claude.json'), 'utf-8')).mcpServers.megalens
+    check('Astra CONFIRM11 #12 (claude-code): same-origin MegaLens update preserves headersHelper and custom headers',
+      rSame.exitCode === 0 &&
+      afterSame.headersHelper === '/usr/local/bin/megalens-headers.sh' &&
+      afterSame.headers['X-Custom'] === '1' &&
+      afterSame.headers.Authorization === `Bearer ${TOKEN_B}`)
+
+    // Mixed-origin (MegaLens url + proxy sseUrl) drops headersHelper and stale sseUrl
+    const { home: hMix, env: eMix } = await newCaseEnv('claude', { MEGALENS_TOKEN: TOKEN_B })
+    await writeFile(join(hMix, '.claude.json'), JSON.stringify({
+      mcpServers: {
+        megalens: {
+          type: 'http',
+          url: 'https://megalens.ai/api/mcp',
+          sseUrl: 'https://proxy.corp.example/sse',
+          headersHelper: '/usr/local/bin/proxy-headers.sh',
+        },
+      },
+    }))
+    const rMix = await runSetupClaudeCode([], {
+      stdout: makeCaptureStream().stream,
+      stderr: makeCaptureStream().stream,
+      env: eMix,
+      home: hMix,
+      isTTY: true,
+      promptOverride: makePromptScript(['y', 'n']).promptOverride,
+    })
+    const afterMix = JSON.parse(await readFile(join(hMix, '.claude.json'), 'utf-8')).mcpServers.megalens
+    check('Astra CONFIRM11 #12 (claude-code): mixed-origin entry drops headersHelper and stale sseUrl',
+      rMix.exitCode === 0 &&
+      !('headersHelper' in afterMix) &&
+      !('sseUrl' in afterMix) &&
+      afterMix.headers.Authorization === `Bearer ${TOKEN_B}`)
   }
 }
 

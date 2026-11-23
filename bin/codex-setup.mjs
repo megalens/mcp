@@ -17,10 +17,14 @@ import {
   makeTimestamp,
   isYes,
   readOptionalFile,
+  verifyFileVersion,
   backupExistingFile,
   writeFileAtomicPreservingMode,
   createPrompter,
   resolveToken,
+  validateEditorToken,
+  gitTrackable,
+  realLocation,
   runAppendInstructionLines,
   runRemoveInstructionLine,
 } from './setup-shared.mjs'
@@ -347,7 +351,27 @@ function inspectHttpHeadersInlineTable(headerLines) {
   return { valid: true, keys }
 }
 
-function inspectCodexConfig(text, { scanTomlLine, tomlHeaderPath }) {
+/** Split a tomlHeaderPath string on unescaped dots (Astra FINAL #6: quoted keys may contain dots/brackets). */
+function splitHeaderPath(path) {
+  if (typeof path !== 'string') return []
+  const parts = []
+  let cur = ''
+  for (let i = 0; i < path.length; i++) {
+    const ch = path[i]
+    if (ch === '\\' && i + 1 < path.length) {
+      cur += path[++i]
+    } else if (ch === '.') {
+      parts.push(cur)
+      cur = ''
+    } else {
+      cur += ch
+    }
+  }
+  parts.push(cur)
+  return parts
+}
+
+export function inspectCodexConfig(text, { scanTomlLine, tomlHeaderPath }, { headerKey = 'http_headers' } = {}) {
   const lines = text.split('\n')
   let delim = null
   let depth = 0
@@ -361,6 +385,7 @@ function inspectCodexConfig(text, { scanTomlLine, tomlHeaderPath }) {
   let hasMegalensSubtable = false
   let hasCommandOrArgs = false
   let hasUrl = false
+  let urlIdx = -1
   let uneditable = false
 
   for (let i = 0; i < lines.length; i++) {
@@ -374,7 +399,7 @@ function inspectCodexConfig(text, { scanTomlLine, tomlHeaderPath }) {
       const path = tomlHeaderPath(line)
       if (path !== null) {
         currentTable = path
-        const headerParts = path.split('.')
+        const headerParts = splitHeaderPath(path)
         const isArrayHeader = line.trim().startsWith('[[')
         if (headerParts.length === 2 && headerParts[0] === 'mcp_servers' && isMegalensName(headerParts[1])) {
           if (isArrayHeader) {
@@ -388,14 +413,19 @@ function inspectCodexConfig(text, { scanTomlLine, tomlHeaderPath }) {
           }
         } else if (headerParts.length >= 3 && headerParts[0] === 'mcp_servers' && isMegalensName(headerParts[1])) {
           hasMegalensSubtable = true
-          if (headerParts.length === 3 && headerParts[2] === 'http_headers') {
+          if (
+            headerParts.length === 3 &&
+            (headerParts[2] === headerKey ||
+              headerParts[2] === 'env_http_headers' ||
+              headerParts[2] === 'oauth')
+          ) {
             hasHttpHeadersSubtable = true
           }
         }
       } else {
         const trimmed = line.trim()
         if (trimmed && !trimmed.startsWith('#')) {
-          const tableParts = currentTable ? currentTable.split('.') : []
+          const tableParts = currentTable ? splitHeaderPath(currentTable) : []
           const inMegalensTable =
             tableParts.length === 2 && tableParts[0] === 'mcp_servers' && isMegalensName(tableParts[1])
           const eqIdx = findTopLevelEquals(line)
@@ -412,7 +442,7 @@ function inspectCodexConfig(text, { scanTomlLine, tomlHeaderPath }) {
               }
             } else if (inMegalensTable && megalensHeaderCount === 1) {
               const first = keyParts[0]
-              if (first.name === 'http_headers') {
+              if (first.name === headerKey) {
                 if (keyParts.length > 1 || first.quoted) {
                   uneditable = true
                 } else if (httpHeadersIdx === -1) {
@@ -424,8 +454,21 @@ function inspectCodexConfig(text, { scanTomlLine, tomlHeaderPath }) {
               if (first.name === 'command' || first.name === 'args') {
                 hasCommandOrArgs = true
               }
+              if (
+                first.name === 'env_http_headers' ||
+                first.name === 'bearer_token_env_var' ||
+                first.name === 'headers_helper' ||
+                first.name === 'headersHelper' ||
+                first.name === 'oauth' ||
+                first.name === 'env' ||
+                first.name === 'env_vars'
+              ) {
+                uneditable = true
+              }
               if (keyParts.length === 1 && first.name === 'url') {
+                if (hasUrl) uneditable = true
                 hasUrl = true
+                urlIdx = i
               }
             }
           }
@@ -433,7 +476,7 @@ function inspectCodexConfig(text, { scanTomlLine, tomlHeaderPath }) {
       }
     }
 
-    const currentParts = currentTable ? currentTable.split('.') : []
+    const currentParts = currentTable ? splitHeaderPath(currentTable) : []
     if (
       currentParts.length === 2 &&
       currentParts[0] === 'mcp_servers' &&
@@ -444,6 +487,8 @@ function inspectCodexConfig(text, { scanTomlLine, tomlHeaderPath }) {
     }
 
     const next = scanTomlLine(line, delim, depth)
+    // The url must be one plain line, so it can be replaced as one (FIX 15, issuer boundaries).
+    if (i === urlIdx && (next.delim || next.depth !== 0)) uneditable = true
     if (httpHeadersIdx !== -1 && httpHeadersEndIdx === -1) {
       if (!next.delim && next.depth === 0) {
         httpHeadersEndIdx = i
@@ -480,19 +525,41 @@ function inspectCodexConfig(text, { scanTomlLine, tomlHeaderPath }) {
     megalensEndIdx,
     httpHeadersIdx,
     httpHeadersEndIdx,
+    urlIdx,
   }
 }
 
-function buildHttpHeadersReplacement(info, token, configEol) {
+/**
+ * The new token and, always, the production URL (Astra FIX 15, issuer boundaries; Astra FINAL #5):
+ * updates ONLY `url` and `http_headers` (or `headers` for Grok) in-place inside
+ * `[mcp_servers.megalens]`, preserving `enabled`, `enabled_tools`, `disabled_tools`, comments, and
+ * every neighboring table.
+ */
+export function buildHttpHeadersReplacement(info, token, configEol, { headerKey = 'http_headers', mcpUrl = CODEX_MCP_URL } = {}) {
   const cr = configEol === '\r\n' ? '\r' : ''
   const nextLines = [...info.lines]
+  let urlBefore = null
+  if (info.urlIdx !== -1) {
+    const raw = nextLines[info.urlIdx]
+    const noCr = raw.endsWith('\r') ? raw.slice(0, -1) : raw
+    const urlLine = `${(noCr.match(/^\s*/) || [''])[0]}url = "${mcpUrl}"`
+    if (noCr !== urlLine) {
+      urlBefore = noCr
+      nextLines[info.urlIdx] = `${urlLine}${raw.endsWith('\r') ? '\r' : ''}`
+    }
+  }
+  const r = buildHeadersOnly(info, nextLines, token, cr, headerKey)
+  return { ...r, urlBefore, urlAfter: urlBefore === null ? null : `url = "${mcpUrl}"` }
+}
+
+function buildHeadersOnly(info, nextLines, token, cr, headerKey = 'http_headers') {
 
   if (info.httpHeadersIdx !== -1) {
     const rawFirst = nextLines[info.httpHeadersIdx]
     const firstNoCr = rawFirst.endsWith('\r') ? rawFirst.slice(0, -1) : rawFirst
     const indent = (firstNoCr.match(/^\s*/) || [''])[0]
-    const newLine = `${indent}http_headers = { "Authorization" = "Bearer ${token}" }`
-    const maskedNewLine = `${indent}http_headers = { "Authorization" = "Bearer ${MASKED_TOKEN}" }`
+    const newLine = `${indent}${headerKey} = { "Authorization" = "Bearer ${token}" }`
+    const maskedNewLine = `${indent}${headerKey} = { "Authorization" = "Bearer ${MASKED_TOKEN}" }`
     const beforeLines = nextLines
       .slice(info.httpHeadersIdx, info.httpHeadersEndIdx + 1)
       .map((l) => (l.endsWith('\r') ? l.slice(0, -1) : l))
@@ -518,8 +585,8 @@ function buildHttpHeadersReplacement(info, token, configEol) {
     const refLine = nextLines[insertAfterIdx]
     indent = (refLine.match(/^\s*/) || [''])[0]
   }
-  const newLine = `${indent}http_headers = { "Authorization" = "Bearer ${token}" }`
-  const maskedNewLine = `${indent}http_headers = { "Authorization" = "Bearer ${MASKED_TOKEN}" }`
+  const newLine = `${indent}${headerKey} = { "Authorization" = "Bearer ${token}" }`
+  const maskedNewLine = `${indent}${headerKey} = { "Authorization" = "Bearer ${MASKED_TOKEN}" }`
   nextLines.splice(insertAfterIdx + 1, 0, `${newLine}${cr}`)
   return {
     nextConfig: nextLines.join('\n'),
@@ -579,6 +646,7 @@ export async function runSetupCodex(args = [], io = {}) {
     now = () => new Date(),
     tomlHelpers,
     promptOverride,
+    validateToken = validateEditorToken,
   } = io
 
   const log = (msg = '') => stdout.write(`${msg}\n`)
@@ -669,7 +737,13 @@ export async function runSetupCodex(args = [], io = {}) {
           log(`  ! ${configPath} is read-only (${readOnlyReason}).`)
           log('    Refusing to replace it; leaving config.toml unchanged.\n')
         } else {
-          const tokenRes = await resolveToken({ env, prompter, errLog })
+          const tokenRes = await resolveToken({
+            env,
+            prompter,
+            errLog,
+            validateToken,
+            allowedLabels: ['default', 'codex'],
+          })
           if (!tokenRes.token) {
             return { exitCode: tokenRes.exitCode, written, dryRun: parsed.dryRun }
           }
@@ -684,6 +758,10 @@ export async function runSetupCodex(args = [], io = {}) {
           if (hasEntry) {
             replacement = buildHttpHeadersReplacement(info, token, configEol)
             log(`\n  Will ${replacement.beforeLines ? 'update http_headers in' : 'add http_headers to'} [mcp_servers.megalens] in ${configPath}:\n`)
+            if (replacement.urlBefore !== null) {
+              log('    - url = (another server; not shown)')
+              log(`    + ${replacement.urlAfter}`)
+            }
             if (replacement.beforeLines) {
               for (const line of replacement.beforeLines) {
                 log(`    - ${maskSecretsInToml(line)}`)
@@ -702,6 +780,9 @@ export async function runSetupCodex(args = [], io = {}) {
             log('')
           }
 
+          const realCfg = await realLocation(configPath)
+          const tracked = realCfg === null ? 'unknown' : gitTrackable(realCfg, env)
+
           const confirmPrompt = hasEntry
             ? '  Replace MegaLens token in Codex? (y/n): '
             : '  Add MegaLens to Codex? (y/n): '
@@ -716,6 +797,30 @@ export async function runSetupCodex(args = [], io = {}) {
           }
 
           if (isYes(answer)) {
+            let allowWrite = true
+            if (tracked !== 'no') {
+              if (tracked === 'yes') {
+                log(`  ! ${realCfg} is inside a git repository and not ignored there.`)
+              } else if (realCfg === null) {
+                log(`  ! Could not work out where ${configPath} really is (a link that could not be followed).`)
+              } else {
+                log(`  ! Could not check with git whether ${realCfg} is inside a repository.`)
+              }
+              log('    A token written into it can be committed and pushed with that repository.')
+              let trackAns
+              try {
+                trackAns = await prompter.askPlain('  Write the MegaLens token into it anyway? (y/N): ')
+              } catch (err) {
+                if (err?.exitCode === 130) {
+                  return { exitCode: 130, written, dryRun: parsed.dryRun }
+                }
+                throw err
+              }
+              allowWrite = isYes(trackAns)
+            }
+            if (!allowWrite) {
+              log(`  Skipped ${configPath}.`)
+            } else {
             let nextConfig
             if (hasEntry) {
               nextConfig = replacement.nextConfig
@@ -732,21 +837,97 @@ export async function runSetupCodex(args = [], io = {}) {
               log(`  [dry-run] Would write ${configPath}`)
             } else {
               try {
-                const target = await realpath(configPath).catch(() => configPath)
-                if (configRead.exists) {
-                  await backupExistingFile(target, timestamp)
+                // Re-read config.toml right before writing AND recheck its file version after
+                // backup and right before rename so concurrent edits outside [mcp_servers.megalens]
+                // are merged rather than erased, and conflicting edits are refused.
+                const snapshotMegalensBlock = hasEntry
+                  ? info.lines.slice(info.megalensStartIdx, info.megalensEndIdx + 1).join('\n')
+                  : null
+                const MAX_WRITE_ATTEMPTS = 3
+                let backedUp = false
+                let saved = false
+                for (let attempt = 0; attempt < MAX_WRITE_ATTEMPTS; attempt++) {
+                  const latestRead = await readOptionalFile(configPath)
+                  if (latestRead.unreadable) {
+                    errLog(`  ! Failed to write ${configPath}: ${latestRead.unreadable}`)
+                    return { exitCode: 1, written, dryRun: parsed.dryRun }
+                  }
+                  let latestExists = configRead.exists
+                  let attemptConfig = nextConfig
+                  if (attempt > 0 || latestRead.exists !== configRead.exists || latestRead.content !== configRead.content) {
+                    if (configRead.exists && !latestRead.exists) {
+                      errLog(`  ! ${configPath} was removed while waiting for confirmation; leaving it untouched.`)
+                      return { exitCode: 1, written, dryRun: parsed.dryRun }
+                    }
+                    const latestReadOnly = latestRead.exists ? await getReadOnlyReason(configPath) : null
+                    if (latestReadOnly) {
+                      errLog(`  ! ${configPath} became read-only (${latestReadOnly}) while waiting for confirmation; leaving it untouched.`)
+                      return { exitCode: 1, written, dryRun: parsed.dryRun }
+                    }
+                    const latestInfo = latestRead.content
+                      ? inspectCodexConfig(latestRead.content, tomlHelpers)
+                      : { unparseable: false, uneditable: false, hasEntry: false }
+                    if (latestInfo.unparseable || latestInfo.uneditable || latestInfo.hasEntry !== hasEntry) {
+                      errLog(`  ! ${configPath} changed while waiting for confirmation (conflicting edit); leaving it untouched.`)
+                      return { exitCode: 1, written, dryRun: parsed.dryRun }
+                    }
+                    const latestEol = latestRead.exists && latestRead.content.length > 0
+                      ? (latestRead.content.includes('\r\n') ? '\r\n' : '\n')
+                      : defaultEol
+                    if (hasEntry) {
+                      const latestMegalensBlock = latestInfo.lines
+                        .slice(latestInfo.megalensStartIdx, latestInfo.megalensEndIdx + 1)
+                        .join('\n')
+                      if (latestMegalensBlock !== snapshotMegalensBlock) {
+                        errLog(`  ! ${configPath} changed while waiting for confirmation (conflicting edit to [mcp_servers.megalens]); leaving it untouched.`)
+                        return { exitCode: 1, written, dryRun: parsed.dryRun }
+                      }
+                      attemptConfig = buildHttpHeadersReplacement(latestInfo, token, latestEol).nextConfig
+                    } else {
+                      const block = formatCodexTomlBlock(token, latestEol)
+                      const base = !latestRead.content
+                        ? ''
+                        : (latestRead.content.endsWith('\n') ? latestRead.content : `${latestRead.content}${latestEol}`)
+                      attemptConfig = `${base}${block}`
+                    }
+                    latestExists = latestRead.exists
+                  }
+
+                  const target = await realpath(configPath).catch(() => configPath)
+                  if (latestExists && !backedUp) {
+                    await backupExistingFile(target, timestamp, { mode: 0o600, env, home, platform, log })
+                    backedUp = true
+                    if (!(await verifyFileVersion(configPath, latestRead.version))) {
+                      continue
+                    }
+                  }
+                  try {
+                    await writeFileAtomicPreservingMode(configPath, attemptConfig, {
+                      defaultMode: 0o600,
+                      preserveMode: false,
+                      log,
+                      expectedVersion: latestRead.version,
+                    })
+                    saved = true
+                    break
+                  } catch (writeErr) {
+                    if (writeErr?.code === 'ECONCURRENT') {
+                      continue
+                    }
+                    throw writeErr
+                  }
                 }
-                await writeFileAtomicPreservingMode(configPath, nextConfig, {
-                  defaultMode: 0o600,
-                  preserveMode: false,
-                  log,
-                })
+                if (!saved) {
+                  errLog(`  ! ${configPath} kept changing while saving; leaving it untouched. Run setup again.`)
+                  return { exitCode: 1, written, dryRun: parsed.dryRun }
+                }
                 written.push(configPath)
                 log(`  Wrote ${configPath}`)
               } catch (err) {
                 errLog(`  ! Failed to write ${configPath}: ${err?.message ?? err}`)
                 return { exitCode: 1, written, dryRun: parsed.dryRun }
               }
+            }
             }
           } else {
             log(`  Skipped ${configPath}.`)

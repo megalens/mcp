@@ -1,7 +1,13 @@
-import { readFile, writeFile, copyFile, mkdir, chmod, rename, unlink, realpath, stat, lstat, chown, access } from 'node:fs/promises'
-import { constants } from 'node:fs'
-import { basename, dirname } from 'node:path'
+import { readFile, writeFile, mkdir, chmod, rename, unlink, realpath, stat, lstat, chown, access, open, link } from 'node:fs/promises'
+import { constants, statSync, readFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { spawnSync } from 'node:child_process'
+import { basename, dirname, join } from 'node:path'
+import { homedir, tmpdir } from 'node:os'
 import { createInterface } from 'node:readline'
+
+export const API_BASE = 'https://megalens.ai'
+export const VALIDATE_URL = `${API_BASE}/api/mcp/validate`
 
 export const MEGALENS_REVIEW_LINE =
   'After you change code that handles money, sign-in, user data or database migrations, and before the user commits it, offer a MegaLens review and wait for a yes before running it.'
@@ -136,32 +142,305 @@ export function isYes(answer) {
   return normalized === 'y' || normalized === 'yes'
 }
 
-export async function readOptionalFile(filePath) {
+export class ConcurrentModificationError extends Error {
+  constructor(filePath) {
+    super(`${filePath} changed on disk before it could be saved`)
+    this.name = 'ConcurrentModificationError'
+    this.code = 'ECONCURRENT'
+    this.filePath = filePath
+  }
+}
+
+async function readVersionFromTarget(filePath) {
+  let fh
   try {
-    const buf = await readFile(filePath)
-    const content = utf8FatalDecoder.decode(buf)
-    return { exists: true, content, unreadable: null }
+    fh = await open(filePath, 'r')
   } catch (err) {
     if (err?.code === 'ENOENT') {
       const lst = await lstat(filePath).catch(() => null)
       if (lst?.isSymbolicLink()) {
-        return { exists: true, content: '', unreadable: 'dangling symlink (target does not exist)' }
+        return { exists: true, target: null, buf: null, unreadable: 'dangling symlink (target does not exist)', version: null }
       }
-      return { exists: false, content: '', unreadable: null }
+      return { exists: false, target: null, buf: null, unreadable: null, version: { exists: false, target: null } }
     }
-    return { exists: true, content: '', unreadable: String(err?.message ?? err) }
+    throw err
+  }
+  try {
+    const target = await realpath(filePath)
+    const st = await fh.stat({ bigint: true })
+    const buf = await fh.readFile()
+    const sha256 = createHash('sha256').update(buf).digest('hex')
+    return {
+      exists: true,
+      target,
+      buf,
+      unreadable: null,
+      version: {
+        exists: true,
+        target,
+        dev: st.dev,
+        ino: st.ino,
+        size: st.size,
+        mtimeNs: st.mtimeNs,
+        ctimeNs: st.ctimeNs,
+        sha256,
+      },
+    }
+  } finally {
+    await fh.close()
   }
 }
 
-export async function backupExistingFile(targetPath, timestamp) {
-  const backupPath = `${targetPath}.bak-${timestamp}`
-  const existingStat = await stat(targetPath)
-  await copyFile(targetPath, backupPath)
-  await chmod(backupPath, existingStat.mode & 0o777).catch(() => {})
-  return backupPath
+export function fileVersionsMatch(a, b) {
+  if (!a || !b) return false
+  if (a.exists !== b.exists) return false
+  if (!a.exists) return true
+  return (
+    a.target === b.target &&
+    a.dev === b.dev &&
+    a.ino === b.ino &&
+    a.size === b.size &&
+    a.mtimeNs === b.mtimeNs &&
+    a.ctimeNs === b.ctimeNs &&
+    a.sha256 === b.sha256
+  )
 }
 
-export async function writeFileAtomicPreservingMode(filePath, contents, { defaultMode, preserveMode = true, log }) {
+export async function verifyFileVersion(filePath, expectedVersion) {
+  if (!expectedVersion) return true
+  try {
+    const current = await readVersionFromTarget(filePath)
+    if (current.unreadable) return false
+    return fileVersionsMatch(current.version, expectedVersion)
+  } catch {
+    return false
+  }
+}
+
+export async function readOptionalFile(filePath) {
+  try {
+    const res = await readVersionFromTarget(filePath)
+    if (res.unreadable) {
+      return { exists: res.exists, content: '', unreadable: res.unreadable, version: null }
+    }
+    if (!res.exists) {
+      return { exists: false, content: '', unreadable: null, version: res.version }
+    }
+    const content = utf8FatalDecoder.decode(res.buf)
+    return { exists: true, content, unreadable: null, version: res.version }
+  } catch (err) {
+    if (err?.code === 'ENOENT') {
+      const lst = await lstat(filePath).catch(() => null)
+      if (lst?.isSymbolicLink()) {
+        return { exists: true, content: '', unreadable: 'dangling symlink (target does not exist)', version: null }
+      }
+      return { exists: false, content: '', unreadable: null, version: { exists: false, target: null } }
+    }
+    return { exists: true, content: '', unreadable: String(err?.message ?? err), version: null }
+  }
+}
+
+/**
+ * Is there a repository's `.git` at this path? 'yes' (a folder with a HEAD file, or a `gitdir:`
+ * file for worktrees and submodules), 'no' (nothing there, or an empty `.git` folder, which git
+ * ignores too), or 'unknown' when it cannot be read (Astra FIX 15 #1).
+ */
+export function gitDirAt(p) {
+  let st
+  try {
+    st = statSync(p)
+  } catch (err) {
+    return err?.code === 'ENOENT' || err?.code === 'ENOTDIR' ? 'no' : 'unknown'
+  }
+  try {
+    if (st.isDirectory()) {
+      try {
+        statSync(join(p, 'HEAD'))
+        return 'yes'
+      } catch (err) {
+        return err?.code === 'ENOENT' ? 'no' : 'unknown'
+      }
+    }
+    if (st.isFile()) return readFileSync(p, 'utf-8').slice(0, 8) === 'gitdir: ' ? 'yes' : 'no'
+  } catch {
+    return 'unknown'
+  }
+  return 'unknown'
+}
+
+/** The worst answer for this folder and every folder above it: 'yes' beats 'unknown' beats 'no'. */
+export function gitAncestor(dir) {
+  let seen = 'no'
+  for (let d = dir; ; ) {
+    const here = gitDirAt(join(d, '.git'))
+    if (here === 'yes') return 'yes'
+    if (here === 'unknown') seen = 'unknown'
+    const up = dirname(d)
+    if (up === d) return seen
+    d = up
+  }
+}
+
+const GIT_CHECK_ENV = new Set([
+  'PATH', 'HOME', 'USER', 'LOGNAME', 'TMPDIR', 'XDG_CONFIG_HOME',
+  'GIT_DIR', 'GIT_WORK_TREE', 'GIT_CEILING_DIRECTORIES', 'GIT_DISCOVERY_ACROSS_FILESYSTEM',
+  'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM', 'GIT_CONFIG_NOSYSTEM',
+  'SYSTEMROOT', 'WINDIR', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'PATHEXT', 'APPDATA', 'LOCALAPPDATA', 'PROGRAMDATA',
+])
+export function gitCheckEnv(env0 = process.env) {
+  const env = {}
+  for (const [k, v] of Object.entries(env0)) if (typeof v === 'string' && GIT_CHECK_ENV.has(k.toUpperCase())) env[k] = v
+  env.GIT_TERMINAL_PROMPT = '0'
+  env.LC_ALL = 'C'
+  env.LANGUAGE = 'C'
+  return env
+}
+
+/**
+ * Could git commit a file written at `path`? 'yes' (inside a work tree, not ignored), 'no' (git
+ * says not in a repo AND no `.git` above, or ignored), or 'unknown' (cannot prove safe).
+ */
+export function gitTrackable(path, env0 = process.env) {
+  const env = gitCheckEnv(env0)
+  let dir = dirname(path)
+  for (;;) {
+    try {
+      statSync(dir)
+      break
+    } catch (err) {
+      if (err?.code !== 'ENOENT') return 'unknown'
+      const up = dirname(dir)
+      if (up === dir) return 'unknown'
+      dir = up
+    }
+  }
+  const scan = env.GIT_DIR || env.GIT_WORK_TREE ? 'unknown' : gitAncestor(dir)
+  const top = spawnSync('git', ['-C', dir, 'rev-parse', '--show-toplevel'], { env, stdio: ['ignore', 'ignore', 'pipe'], encoding: 'utf-8' })
+  if (top.error) return scan === 'no' ? 'no' : 'unknown'
+  if (top.status !== 0) {
+    if (/not a git repository/i.test(top.stderr ?? '') && scan === 'no') return 'no'
+    return 'unknown'
+  }
+  const ignored = spawnSync('git', ['-C', dir, 'check-ignore', '-q', path], { env, stdio: 'ignore' })
+  if (ignored.status === 0) return 'no'
+  if (ignored.status === 1) return 'yes'
+  return 'unknown'
+}
+
+/**
+ * Where a write to `path` really lands, or null when that cannot be known (dangling link, loop,
+ * permission error).
+ */
+export async function realLocation(path) {
+  try {
+    return await realpath(path)
+  } catch (err) {
+    if (err?.code !== 'ENOENT') return null
+  }
+  let missing = []
+  let cur = path
+  for (;;) {
+    try {
+      await lstat(cur)
+      return null
+    } catch (err) {
+      if (err?.code !== 'ENOENT') return null
+    }
+    missing = [basename(cur), ...missing]
+    const up = dirname(cur)
+    if (up === cur) return null
+    cur = up
+    try {
+      return join(await realpath(cur), ...missing)
+    } catch (err) {
+      if (err?.code !== 'ENOENT') return null
+    }
+  }
+}
+
+function externalBackupDirs(env = process.env, home = homedir(), platform = process.platform) {
+  const dirs = []
+  if (platform === 'win32') {
+    dirs.push(join(env.LOCALAPPDATA || join(home, 'AppData', 'Local'), 'megalens', 'backups'))
+  } else {
+    dirs.push(join(env.XDG_STATE_HOME || join(home, '.local', 'state'), 'megalens', 'backups'))
+  }
+  const uidTag = typeof process.getuid === 'function' ? String(process.getuid()) : 'user'
+  dirs.push(join(tmpdir(), `megalens-backups-${uidTag}`))
+  return dirs
+}
+
+/**
+ * Save a backup of `targetPath` before modifying it.
+ *
+ * Security (Astra FINAL #3): a sibling `.bak-<timestamp>` inside a git repository would become an
+ * untracked committable file even when `targetPath` itself is git-ignored, exposing the entire
+ * prior config (and other services' credentials). We therefore check `gitTrackable` on the ACTUAL
+ * backup path before copying any bytes. Whenever the sibling path is inside a git repo (or cannot
+ * be proven outside one), the backup is stored in a private 0700 directory outside the worktree
+ * (verified with `gitTrackable === 'no'`). If no safe backup directory can be verified, no backup
+ * is created rather than writing secrets into a repository.
+ *
+ * Also writes atomically with `flag: 'wx'` and the target mode from creation (never briefly 0644).
+ */
+export async function backupExistingFile(
+  targetPath,
+  timestamp = makeTimestamp(),
+  { mode, env = process.env, home = homedir(), platform = process.platform, log } = {},
+) {
+  const existingStat = await stat(targetPath)
+  const targetMode = mode ?? (existingStat.mode & 0o777)
+  const siblingPath = `${targetPath}.bak-${timestamp}`
+  let backupPath = null
+
+  if (gitTrackable(siblingPath, env) === 'no') {
+    backupPath = siblingPath
+  } else {
+    const pathHash = createHash('sha256').update(targetPath).digest('hex').slice(0, 8)
+    const fileName = `${basename(targetPath)}.${pathHash}.bak-${timestamp}`
+    for (const dir of externalBackupDirs(env, home, platform)) {
+      const candidate = join(dir, fileName)
+      if (gitTrackable(candidate, env) !== 'no') continue
+      try {
+        await mkdir(dir, { recursive: true, mode: 0o700 })
+        await chmod(dir, 0o700).catch(() => {})
+        const dirReal = await realpath(dir).catch(() => null)
+        if (!dirReal || gitTrackable(join(dirReal, fileName), env) !== 'no') continue
+        const dirStat = await stat(dirReal)
+        if (typeof process.getuid === 'function' && dirStat.uid !== process.getuid()) continue
+        backupPath = join(dirReal, fileName)
+        break
+      } catch {
+        // try next fallback dir
+      }
+    }
+  }
+
+  if (!backupPath) {
+    if (typeof log === 'function') {
+      log(`  ! Skipped backup of ${targetPath}: could not find a backup folder outside git.`)
+    }
+    return null
+  }
+
+  const content = await readFile(targetPath)
+  let writtenPath = backupPath
+  try {
+    await writeFile(writtenPath, content, { mode: targetMode, flag: 'wx' })
+  } catch (err) {
+    if (err?.code !== 'EEXIST') throw err
+    writtenPath = `${backupPath}.${process.pid}.${process.hrtime.bigint().toString(36)}`
+    await writeFile(writtenPath, content, { mode: targetMode, flag: 'wx' })
+  }
+  await chmod(writtenPath, targetMode).catch(() => {})
+  return writtenPath
+}
+
+export async function writeFileAtomicPreservingMode(
+  filePath,
+  contents,
+  { defaultMode, preserveMode = true, log, expectedVersion } = {},
+) {
   const lst = await lstat(filePath).catch(() => null)
   let target
   try {
@@ -200,6 +479,26 @@ export async function writeFileAtomicPreservingMode(filePath, contents, { defaul
           await chown(tmp, existing.uid, existing.gid)
         } catch {
           log(`\n  ! Could not preserve ownership of ${target}; it will belong to the current user.`)
+        }
+      }
+    }
+    if (expectedVersion) {
+      const unchanged = await verifyFileVersion(filePath, expectedVersion)
+      if (!unchanged) {
+        throw new ConcurrentModificationError(filePath)
+      }
+      if (!expectedVersion.exists) {
+        try {
+          await link(tmp, target)
+          await unlink(tmp).catch(() => {})
+          return
+        } catch (linkErr) {
+          if (linkErr?.code === 'EEXIST') {
+            throw new ConcurrentModificationError(filePath)
+          }
+          if (!['EPERM', 'ENOTSUP', 'ENOSYS', 'EXDEV', 'EINVAL'].includes(linkErr?.code)) {
+            throw linkErr
+          }
         }
       }
     }
@@ -371,7 +670,52 @@ export function createPrompter(stdin, stdout) {
   return { askPlain, askHidden }
 }
 
-export async function resolveToken({ env, prompter, errLog }) {
+/**
+ * Verify a manually supplied token with MegaLens and require a verified Editor credential
+ * (Astra FINAL #9, CONFIRM10 #13). Accepts `default` and (for tool-specific installers like
+ * `setup claude-code`, `setup antigravity`, `setup codex`) the matching onboarding tool label.
+ * Never accepts a GitHub Action token (`github-action`), another tool's label, an unlabeled
+ * token, an invalid token, or an unreachable validation server.
+ */
+export async function validateEditorToken(
+  token,
+  { fetchImpl = globalThis.fetch, allowedLabels = ['default'] } = {},
+) {
+  let res
+  let data = null
+  try {
+    res = await fetchImpl(`${VALIDATE_URL}?include_label=1`, {
+      headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
+      redirect: 'error',
+      signal: AbortSignal.timeout(30_000),
+    })
+    data = await res.json().catch(() => null)
+  } catch (err) {
+    return { ok: false, reason: 'network', error: String(err?.message ?? 'connection failed') }
+  }
+  if (!res.ok || data?.valid !== true) {
+    return { ok: false, reason: 'invalid', error: typeof data?.error === 'string' ? data.error : `HTTP ${res.status}` }
+  }
+  const label = typeof data.label === 'string' ? data.label : null
+  if (!label || !allowedLabels.includes(label)) {
+    return { ok: false, reason: 'wrong_label', label, allowedLabels }
+  }
+  return {
+    ok: true,
+    isPro: !!data.is_pro,
+    isPayg: !!data.is_payg,
+    planCode: data.plan_code ?? 'free',
+    label,
+  }
+}
+
+export async function resolveToken({
+  env,
+  prompter,
+  errLog,
+  validateToken = validateEditorToken,
+  allowedLabels = ['default'],
+}) {
   const envToken = typeof env.MEGALENS_TOKEN === 'string' ? env.MEGALENS_TOKEN.trim() : ''
   let token = envToken
   if (!token) {
@@ -388,7 +732,139 @@ export async function resolveToken({ env, prompter, errLog }) {
     return { token: null, exitCode: 1 }
   }
 
+  const check = await validateToken(token, { allowedLabels })
+  if (!check?.ok) {
+    if (check?.reason === 'wrong_label') {
+      if (check.label === 'github-action') {
+        errLog('  This is a GitHub Action token, not an Editor token. It cannot be installed in an editor.')
+      } else {
+        const expected = allowedLabels.map((l) => `"${l}"`).join(' or ')
+        errLog(`  This token is not a verified Editor token (expected label ${expected}). It cannot be installed here.`)
+      }
+      errLog('  Get your Editor token at https://megalens.ai/app/settings/mcp or run: npx megalens-mcp setup\n')
+    } else if (check?.reason === 'network') {
+      errLog(`  Could not verify token with MegaLens (${maskTokenSecrets(check.error ?? 'connection failed')}). Nothing was written.\n`)
+    } else {
+      errLog(`  Token validation failed: ${maskTokenSecrets(check?.error ?? 'invalid token')}. Nothing was written.`)
+      errLog('  Get your Editor token at https://megalens.ai/app/settings/mcp\n')
+    }
+    return { token: null, exitCode: 1 }
+  }
+
   return { token, exitCode: 0 }
+}
+
+export function parseUrlOrigin(value) {
+  if (typeof value !== 'string') return null
+  try {
+    return new URL(value).origin
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Canonical JSON serialisation with sorted object keys for structural equality checks
+ * (concurrent-edit detection in host setup, Astra CONFIRM10 #11).
+ */
+export function stableJson(value) {
+  if (value === undefined) return undefined
+  if (value === null || typeof value !== 'object') return JSON.stringify(value)
+  if (Array.isArray(value)) return `[${value.map((v) => stableJson(v) ?? 'null').join(',')}]`
+  const keys = Object.keys(value).sort()
+  const parts = []
+  for (const k of keys) {
+    const v = stableJson(value[k])
+    if (v !== undefined) parts.push(`${JSON.stringify(k)}:${v}`)
+  }
+  return `{${parts.join(',')}}`
+}
+
+/**
+ * Non-credential UI/behaviour fields safe to keep when repointing an existing `megalens` entry
+ * from another origin (or a non-URL/stdio entry) to MegaLens. Everything else — static headers,
+ * Claude Code's `headersHelper`, `oauth`, `auth*`, `env`, `command`/`args`, stale URL fields,
+ * and any future host credential helper — is dropped on an origin change so credentials meant
+ * for another host can never be sent to MegaLens (Astra CONFIRM10 #12, CONFIRM11 #12).
+ */
+const CROSS_ORIGIN_SAFE_FIELDS = new Set([
+  'disabled',
+  'enabled',
+  'disabledTools',
+  'enabledTools',
+  'autoApprove',
+  'alwaysAllow',
+  'timeout',
+])
+
+/**
+ * Merge a MegaLens MCP server entry into `existing[mapKey].megalens` while preserving
+ * user-configured non-credential fields (`disabled`, etc.) and other servers.
+ *
+ * Security (Astra CONFIRM10 #12, CONFIRM11 #12): extra custom headers AND host-specific fields
+ * (such as Claude Code's `headersHelper`, `oauth`, `auth*`, `env`, etc.) are preserved ONLY when
+ * every existing endpoint URL field (`url`, `httpUrl`, `serverUrl`, `sseUrl`, `baseUrl`) on
+ * `prevEntry` parses to the exact same origin as the target MegaLens endpoint. If the origin
+ * changed, was absent, was invalid, or mixed multiple origins, old headers and every non-allowlisted
+ * field (including `headersHelper`) are dropped so credentials meant for another host (e.g. a
+ * proxy API key or dynamic header helper) are never sent to MegaLens. Stale alternate URL keys
+ * not set by `entry` and case-variant `authorization` headers are also cleared.
+ */
+export function mergeMcpServerEntry(existing, mapKey, entry, { defaultFields = {} } = {}) {
+  const isObj = (v) => Boolean(v) && typeof v === 'object' && !Array.isArray(v)
+  const base = isObj(existing) ? existing : {}
+  const prevMap = isObj(base[mapKey]) ? base[mapKey] : {}
+  const prevEntry = isObj(prevMap.megalens) ? prevMap.megalens : {}
+  const prevHeaders = isObj(prevEntry.headers) ? prevEntry.headers : {}
+
+  const urlKeys = ['url', 'httpUrl', 'serverUrl', 'sseUrl', 'baseUrl']
+  const entryOrigins = urlKeys
+    .filter((k) => entry[k] !== undefined)
+    .map((k) => parseUrlOrigin(entry[k]))
+  const targetOrigin = entryOrigins.length === 1 ? entryOrigins[0] : null
+
+  const prevUrls = urlKeys
+    .filter((k) => prevEntry[k] !== undefined)
+    .map((k) => prevEntry[k])
+  const sameOrigin =
+    targetOrigin !== null &&
+    prevUrls.length > 0 &&
+    prevUrls.every((u) => parseUrlOrigin(u) === targetOrigin)
+
+  const keptHeaders = {}
+  const nextPrevEntry = {}
+  if (sameOrigin) {
+    for (const [k, v] of Object.entries(prevHeaders)) {
+      if (k.toLowerCase() === 'authorization') continue
+      keptHeaders[k] = v
+    }
+    for (const [k, v] of Object.entries(prevEntry)) {
+      if (urlKeys.includes(k) && !(k in entry)) continue
+      nextPrevEntry[k] = v
+    }
+  } else {
+    for (const [k, v] of Object.entries(prevEntry)) {
+      if (CROSS_ORIGIN_SAFE_FIELDS.has(k)) {
+        nextPrevEntry[k] = v
+      }
+    }
+  }
+
+  return {
+    ...base,
+    [mapKey]: {
+      ...prevMap,
+      megalens: {
+        ...defaultFields,
+        ...nextPrevEntry,
+        ...entry,
+        headers: {
+          ...keptHeaders,
+          ...(isObj(entry.headers) ? entry.headers : {}),
+        },
+      },
+    },
+  }
 }
 
 export function removeExactInstructionLines(content, exactLines = REMOVABLE_INSTRUCTION_LINES) {
@@ -633,15 +1109,64 @@ export async function runAppendInstructionLines({
   }
 
   try {
-    const target = await realpath(filePath).catch(() => filePath)
-    if (read.exists) {
-      await backupExistingFile(target, timestamp)
+    // Re-read before writing AND recheck version after backup and before rename so concurrent
+    // edits while the prompt or backup is running are never silently erased.
+    const MAX_WRITE_ATTEMPTS = 3
+    let backedUp = false
+    let saved = false
+    for (let attempt = 0; attempt < MAX_WRITE_ATTEMPTS; attempt++) {
+      const latestRead = await readOptionalFile(filePath)
+      if (latestRead.unreadable) {
+        errLog(`  ! ${filePath} could not be read: ${latestRead.unreadable}`)
+        return { exitCode: 1 }
+      }
+      let writePlan = plan
+      let writeExists = read.exists
+      if (attempt > 0 || latestRead.exists !== read.exists || latestRead.content !== read.content) {
+        if (read.exists && !latestRead.exists) {
+          errLog(`  ! ${filePath} was removed while waiting for confirmation. Leaving it untouched.`)
+          return { exitCode: 1 }
+        }
+        const latestReadOnly = latestRead.exists ? await getReadOnlyReason(filePath) : null
+        if (latestReadOnly) {
+          errLog(`  ! ${filePath} became read-only (${latestReadOnly}) while waiting for confirmation. Leaving ${fileLabel} untouched.`)
+          return { exitCode: 1 }
+        }
+        writePlan = planInstructionLineUpdates(latestRead.content, { exists: latestRead.exists, platform })
+        writeExists = latestRead.exists
+        if (!writePlan.hasChanges) {
+          log(`  ${filePath} already has the MegaLens lines. Leaving it unchanged.\n`)
+          return { exitCode: 0 }
+        }
+      }
+      const target = await realpath(filePath).catch(() => filePath)
+      if (writeExists && !backedUp) {
+        await backupExistingFile(target, timestamp)
+        backedUp = true
+        if (!(await verifyFileVersion(filePath, latestRead.version))) {
+          continue
+        }
+      }
+      try {
+        await writeFileAtomicPreservingMode(filePath, writePlan.nextContent, {
+          defaultMode: 0o644,
+          preserveMode: true,
+          log,
+          expectedVersion: latestRead.version,
+        })
+        saved = true
+        break
+      } catch (writeErr) {
+        if (writeErr?.code === 'ECONCURRENT') {
+          continue
+        }
+        throw writeErr
+      }
     }
-    await writeFileAtomicPreservingMode(filePath, plan.nextContent, {
-      defaultMode: 0o644,
-      preserveMode: true,
-      log,
-    })
+    if (!saved) {
+      errLog(`  ! ${filePath} kept changing while saving; leaving it untouched.`)
+      return { exitCode: 1 }
+    }
     written.push(filePath)
     log(`  Wrote ${filePath}\n`)
     return { exitCode: 0 }
@@ -735,17 +1260,112 @@ export async function runRemoveInstructionLine({
   }
 
   try {
-    const target = await realpath(filePath).catch(() => filePath)
-    await backupExistingFile(target, timestamp)
-    await writeFileAtomicPreservingMode(filePath, removal.nextContent, {
-      defaultMode: 0o644,
-      preserveMode: true,
-      log,
-    })
+    const MAX_WRITE_ATTEMPTS = 3
+    let backedUp = false
+    let saved = false
+    for (let attempt = 0; attempt < MAX_WRITE_ATTEMPTS; attempt++) {
+      const latestRead = await readOptionalFile(filePath)
+      if (latestRead.unreadable) {
+        errLog(`  ! ${filePath} could not be read: ${latestRead.unreadable}`)
+        return { exitCode: 1, written: [], dryRun }
+      }
+      if (!latestRead.exists) {
+        log(`  ${filePath} no longer exists. Nothing to remove.\n`)
+        return { exitCode: 0, written: [], dryRun }
+      }
+      const latestReadOnly = await getReadOnlyReason(filePath)
+      if (latestReadOnly) {
+        errLog(`  ! ${filePath} became read-only (${latestReadOnly}) while waiting for confirmation. Leaving ${fileLabel} untouched.`)
+        return { exitCode: 1, written: [], dryRun }
+      }
+      const latestRemoval = removeExactInstructionLines(latestRead.content, targetLines)
+      if (!latestRemoval.found) {
+        log(`  MegaLens lines not found in ${filePath}. Leaving it unchanged.\n`)
+        return { exitCode: 0, written: [], dryRun }
+      }
+      const target = await realpath(filePath).catch(() => filePath)
+      if (!backedUp) {
+        await backupExistingFile(target, timestamp)
+        backedUp = true
+        if (!(await verifyFileVersion(filePath, latestRead.version))) {
+          continue
+        }
+      }
+      try {
+        await writeFileAtomicPreservingMode(filePath, latestRemoval.nextContent, {
+          defaultMode: 0o644,
+          preserveMode: true,
+          log,
+          expectedVersion: latestRead.version,
+        })
+        saved = true
+        break
+      } catch (writeErr) {
+        if (writeErr?.code === 'ECONCURRENT') {
+          continue
+        }
+        throw writeErr
+      }
+    }
+    if (!saved) {
+      errLog(`  ! ${filePath} kept changing while saving; leaving it untouched.`)
+      return { exitCode: 1, written: [], dryRun }
+    }
     log(`  Removed MegaLens ${plural ? 'lines' : 'line'} from ${filePath}.\n`)
     return { exitCode: 0, written: [filePath], dryRun }
   } catch (err) {
     errLog(`  ! Failed to write ${filePath}: ${err?.message ?? err}`)
     return { exitCode: 1, written: [], dryRun }
   }
+}
+
+/**
+ * A (Y/n) or (y/N) answer. Empty takes the default; only y/yes is yes; n, no, and anything
+ * mistyped is no. (The setup wizard used to skip a tool only on exactly "n", so "no" meant yes.)
+ */
+export function answerIsYes(answer, defaultYes) {
+  const a = String(answer ?? '').trim().toLowerCase()
+  if (a === '') return defaultYes
+  return a === 'y' || a === 'yes'
+}
+
+/**
+ * Read one line from a terminal without echoing it. Raw mode only: no readline interface is
+ * attached to the output, so nothing typed or pasted is ever written back (Astra FIX 17 #6: the
+ * old reader created a readline on stdout, which echoed the pasted token). Prints the prompt and,
+ * at the end, one newline. Ctrl+C exits.
+ */
+export function readHiddenLine({ input = process.stdin, output = process.stdout, prompt = '', exit = (c) => process.exit(c) } = {}) {
+  return new Promise((resolve) => {
+    const wasRaw = !!input.isRaw
+    // Echo off BEFORE the prompt appears: a paste that arrives the moment the prompt shows must
+    // never be echoed by the terminal (found when the pty test ran under load).
+    input.setRawMode(true)
+    output.write(prompt)
+    if (typeof input.resume === 'function') input.resume()
+    let buf = ''
+    const done = (value) => {
+      input.removeListener('data', onData)
+      input.setRawMode(wasRaw)
+      if (typeof input.pause === 'function') input.pause()
+      output.write('\n')
+      resolve(value)
+    }
+    const onData = (chunk) => {
+      const text = String(chunk)
+      for (let i = 0; i < text.length; i++) {
+        const c = text[i]
+        if (c === '\n' || c === '\r') return done(buf.trim())
+        if (c === '\u0003') {
+          input.setRawMode(wasRaw)
+          output.write('\n')
+          return exit(130)
+        }
+        if (c === '\u001b') return // an escape sequence (arrow keys): ignore the rest of this chunk
+        if (c === '\u007f' || c === '\b') buf = buf.slice(0, -1)
+        else if (c >= ' ') buf += c
+      }
+    }
+    input.on('data', onData)
+  })
 }

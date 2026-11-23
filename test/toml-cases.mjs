@@ -66,6 +66,15 @@ const cases = [
   ['empty file',                       '',                                          { has: 'ml_tok_NEW', blocks: 1 }],
   ['UNTERMINATED string (must bail)',  'x = """\nnever closed\n',                   { bail: true }],
   ['UNTERMINATED array (must bail)',   'x = [\n1,\n',                               { bail: true }],
+  ['ASTRA #6: quoted table key with ] after megalens',
+    OLD + '\n[projects."/home/user/app[v2]"]\ntrust_level = "trusted"\n',
+    { gone: 'ml_tok_OLD', has: 'ml_tok_NEW', keep: ['[projects."/home/user/app[v2]"]', 'trust_level = "trusted"'], blocks: 1 }],
+  ['ASTRA #6: single-quoted table key with ] and \\ after megalens',
+    OLD + "\n[projects.'C:\\work\\app[1]']\ntrust_level = \"trusted\"\n",
+    { gone: 'ml_tok_OLD', has: 'ml_tok_NEW', keep: ["[projects.'C:\\work\\app[1]']", 'trust_level = "trusted"'], blocks: 1 }],
+  ['ASTRA #6: single quoted key containing literal dot is not mcp_servers.megalens',
+    '["mcp_servers.megalens"]\nkeep = true\n',
+    { keep: ['["mcp_servers.megalens"]', 'keep = true'], blocks: 1 }],
 ]
 
 let pass = 0, fail = 0

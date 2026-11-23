@@ -16,9 +16,12 @@ import {
   hasMegaLensDecisionLine,
   hasMegaLensDecisionV1Line,
   getMissingInstructionLines,
-  runSetupCodex,
+  runSetupCodex as rawRunSetupCodex,
 } from '../bin/codex-setup.mjs'
 import { planInstructionLineUpdates } from '../bin/setup-shared.mjs'
+
+const okDefaultValidator = async () => ({ ok: true, isPro: false, isPayg: true, planCode: 'test', label: 'default' })
+const runSetupCodex = (args = [], io = {}) => rawRunSetupCodex(args, { validateToken: okDefaultValidator, ...io })
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const CLI = join(HERE, '..', 'bin', 'cli.mjs')
@@ -329,6 +332,36 @@ async function newHome(useDefaultHome = false) {
   check('--replace-token creates backup of old config',
     Boolean(backup) && (await readFile(join(codexHome, backup), 'utf-8')).includes(TOKEN_A))
   check('--replace-token never echoes new token', !out.text().includes(SECRET_PART_B))
+}
+
+// ── 5b. --replace-token on an entry for another server: the URL becomes production too (FIX 15) ──
+{
+  const { home, codexHome, env } = await newHome(false)
+  await mkdir(codexHome, { recursive: true })
+  const configPath = join(codexHome, 'config.toml')
+  const initial = `[mcp_servers.megalens]\nurl = "https://staging.example/api/mcp?ide=codex&k=STAGINGSECRET"\nhttp_headers = { "Authorization" = "Bearer ${TOKEN_A}" }\n`
+  await writeFile(configPath, initial)
+  const out = makeCaptureStream()
+  const err = makeCaptureStream()
+  const { promptOverride } = makePromptScript(['y', 'n'])
+  const res = await runSetupCodex(['--replace-token'], {
+    stdout: out.stream,
+    stderr: err.stream,
+    env: { ...env, MEGALENS_TOKEN: TOKEN_B },
+    home,
+    isTTY: true,
+    tomlHelpers,
+    promptOverride,
+    now: () => new Date('2026-11-16T12:03:00.000Z'),
+  })
+  const after = await readFile(configPath, 'utf-8')
+  check('--replace-token on a staging entry writes the production URL with the new token',
+    res.exitCode === 0 &&
+    after.includes('url = "https://megalens.ai/api/mcp?ide=codex"') &&
+    !after.includes('staging.example') &&
+    after.includes(TOKEN_B) &&
+    !after.includes(TOKEN_A))
+  check('--replace-token never prints the old URL', !out.text().includes('STAGINGSECRET') && !err.text().includes('STAGINGSECRET'))
 }
 
 // ── 6. AGENTS.md exists with / without MegaLens line (idempotent + backup) ───
@@ -1642,6 +1675,282 @@ async function newHome(useDefaultHome = false) {
     planBomRemove.hasChanges &&
     planBomRemove.removals.length === 1 &&
     planBomRemove.nextContent === `\uFEFF${CODEX_AGENTS_LINE}\r\n${DECISION_LINE}\r\n`)
+}
+
+// ── Fix round 10 (Astra FINAL): #3 backup outside git, #5 preserve fields, #6 quoted ], #9 label check ─
+{
+  // #5 + #6: --replace-token preserves enabled=false, enabled_tools, and following [projects."/a/b[1]"]
+  const { home, codexHome, env } = await newHome(false)
+  await mkdir(codexHome, { recursive: true })
+  const cfgPath = join(codexHome, 'config.toml')
+  await writeFile(
+    cfgPath,
+    [
+      '[mcp_servers.megalens]',
+      'url = "https://megalens.ai/api/mcp?ide=codex"',
+      `http_headers = { "Authorization" = "Bearer ${TOKEN_A}" }`,
+      'enabled = false',
+      'enabled_tools = ["megalens_review"]',
+      '',
+      '[projects."/home/user/app[v2]"]',
+      'trust_level = "trusted"',
+      '',
+    ].join('\n'),
+  )
+  const out = makeCaptureStream()
+  const err = makeCaptureStream()
+  const { promptOverride } = makePromptScript(['y', 'n'])
+  const res = await runSetupCodex(['--replace-token'], {
+    stdout: out.stream,
+    stderr: err.stream,
+    env: { ...env, MEGALENS_TOKEN: TOKEN_B },
+    home,
+    isTTY: true,
+    tomlHelpers,
+    promptOverride,
+    now: () => new Date('2026-11-22T07:00:00.000Z'),
+  })
+  const after = await readFile(cfgPath, 'utf-8')
+  check('Astra FINAL #5/#6: codex --replace-token preserves enabled, enabled_tools, and [projects."...[v2]"]',
+    res.exitCode === 0 &&
+    after.includes(`Bearer ${TOKEN_B}`) &&
+    !after.includes(TOKEN_A) &&
+    after.includes('enabled = false') &&
+    after.includes('enabled_tools = ["megalens_review"]') &&
+    after.includes('[projects."/home/user/app[v2]"]') &&
+    after.includes('trust_level = "trusted"'))
+
+  // #9: setup codex refuses github-action label, unlabeled token, invalid token, and network failure
+  for (const [label, validator] of [
+    ['github-action token', async () => ({ ok: false, reason: 'wrong_label', label: 'github-action' })],
+    ['missing label', async () => ({ ok: false, reason: 'wrong_label', label: null })],
+    ['invalid token', async () => ({ ok: false, reason: 'invalid', error: 'revoked' })],
+    ['network error', async () => ({ ok: false, reason: 'network', error: 'ECONNREFUSED' })],
+  ]) {
+    const { home: h9, codexHome: ch9, env: e9 } = await newHome(false)
+    const o9 = makeCaptureStream()
+    const er9 = makeCaptureStream()
+    const r9 = await runSetupCodex([], {
+      stdout: o9.stream,
+      stderr: er9.stream,
+      env: { ...e9, MEGALENS_TOKEN: TOKEN_A },
+      home: h9,
+      isTTY: true,
+      tomlHelpers,
+      validateToken: validator,
+      promptOverride: makePromptScript([]).promptOverride,
+    })
+    const existsAfter = await readFile(join(ch9, 'config.toml'), 'utf-8').then(() => true, () => false)
+    check(`Astra FINAL #9: setup codex refuses ${label} and writes nothing`, r9.exitCode === 1 && !existsAfter)
+  }
+
+  // #3: git-ignored config.toml inside a dotfiles git repo saves backup outside the repo (git status clean)
+  const { home: h3, env: e3 } = await newHome(true)
+  const repoDir = join(h3, 'dotfiles')
+  const repoCodex = join(repoDir, '.codex')
+  await mkdir(repoCodex, { recursive: true })
+  spawnSync('git', ['init', '-q', repoDir])
+  await writeFile(join(repoDir, '.gitignore'), '.codex/config.toml\n')
+  const ignoredCfg = join(repoCodex, 'config.toml')
+  const prior = 'other_secret = "sk-other-999"\n'
+  await writeFile(ignoredCfg, prior)
+  const o3 = makeCaptureStream()
+  const er3 = makeCaptureStream()
+  const r3 = await runSetupCodex([], {
+    stdout: o3.stream,
+    stderr: er3.stream,
+    env: { ...e3, HOME: h3, PATH: process.env.PATH ?? '', CODEX_HOME: repoCodex, MEGALENS_TOKEN: TOKEN_A },
+    home: h3,
+    isTTY: true,
+    tomlHelpers,
+    promptOverride: makePromptScript(['y', 'n']).promptOverride,
+    now: () => new Date('2026-11-22T07:05:00.000Z'),
+  })
+  const repoFiles = await readdir(repoCodex)
+  const status = spawnSync('git', ['-C', repoDir, 'status', '--porcelain'], { encoding: 'utf-8' }).stdout.trim()
+  check('Astra FINAL #3: git-ignored config.toml backup stays outside the dotfiles repo',
+    r3.exitCode === 0 &&
+    !repoFiles.some((f) => f.includes('.bak-')) &&
+    !status.includes('.bak-'))
+  // Fix round 11 (Astra CONFIRM10 #11, #12, #13):
+  // #11: Unrelated server added to config.toml while confirmation prompt is open is preserved; conflicting edit refused
+  const { home: h11, codexHome: ch11, env: e11 } = await newHome(false)
+  await mkdir(ch11, { recursive: true })
+  const cfg11 = join(ch11, 'config.toml')
+  await writeFile(cfg11, 'model = "o3"\n')
+  const r11 = await runSetupCodex([], {
+    stdout: makeCaptureStream().stream,
+    stderr: makeCaptureStream().stream,
+    env: { ...e11, MEGALENS_TOKEN: TOKEN_A },
+    home: h11,
+    isTTY: true,
+    tomlHelpers,
+    promptOverride: {
+      async askHidden() { throw new Error('unexpected') },
+      async askPlain(prompt) {
+        if (prompt.includes('Add MegaLens to Codex?')) {
+          await writeFile(cfg11, 'model = "o3"\n\n[mcp_servers.second]\nurl = "https://second.example"\n')
+          return 'y'
+        }
+        return 'n'
+      },
+    },
+  })
+  const after11 = await readFile(cfg11, 'utf-8')
+  check('Astra CONFIRM10 #11 (codex): concurrent unrelated server added while prompt is open is preserved',
+    r11.exitCode === 0 &&
+    after11.includes('[mcp_servers.second]') &&
+    after11.includes('[mcp_servers.megalens]') &&
+    after11.includes(`Bearer ${TOKEN_A}`))
+
+  const { home: h11c, codexHome: ch11c, env: e11c } = await newHome(false)
+  await mkdir(ch11c, { recursive: true })
+  const cfg11c = join(ch11c, 'config.toml')
+  await writeFile(cfg11c, 'model = "o3"\n')
+  const concurrentToml = `model = "o3"\n\n[mcp_servers.megalens]\nurl = "https://megalens.ai/api/mcp?ide=codex"\nhttp_headers = { "Authorization" = "Bearer ${TOKEN_B}" }\n`
+  const r11c = await runSetupCodex([], {
+    stdout: makeCaptureStream().stream,
+    stderr: makeCaptureStream().stream,
+    env: { ...e11c, MEGALENS_TOKEN: TOKEN_A },
+    home: h11c,
+    isTTY: true,
+    tomlHelpers,
+    promptOverride: {
+      async askHidden() { throw new Error('unexpected') },
+      async askPlain(prompt) {
+        if (prompt.includes('Add MegaLens to Codex?')) {
+          await writeFile(cfg11c, concurrentToml)
+          return 'y'
+        }
+        return 'n'
+      },
+    },
+  })
+  check('Astra CONFIRM10 #11 (codex): conflicting edit to [mcp_servers.megalens] while prompt is open exits 1 and leaves file untouched',
+    r11c.exitCode === 1 && (await readFile(cfg11c, 'utf-8')) === concurrentToml)
+
+  // #12: Codex entry with env_http_headers or bearer_token_env_var is treated as uneditable (never carries env creds across origins)
+  for (const [label, extraToml] of [
+    ['env_http_headers', 'env_http_headers = { "X-Proxy-Key" = "PROXY_KEY" }'],
+    ['bearer_token_env_var', 'bearer_token_env_var = "OTHER_TOKEN"'],
+  ]) {
+    const { home: h12, codexHome: ch12, env: e12 } = await newHome(false)
+    await mkdir(ch12, { recursive: true })
+    const cfg12 = join(ch12, 'config.toml')
+    const init12 = `[mcp_servers.megalens]\nurl = "https://other.example/mcp"\n${extraToml}\n`
+    await writeFile(cfg12, init12)
+    const o12 = makeCaptureStream()
+    const r12 = await runSetupCodex(['--replace-token'], {
+      stdout: o12.stream,
+      stderr: makeCaptureStream().stream,
+      env: { ...e12, MEGALENS_TOKEN: TOKEN_B },
+      home: h12,
+      isTTY: true,
+      tomlHelpers,
+      promptOverride: makePromptScript(['n']).promptOverride,
+    })
+    check(`Astra CONFIRM10 #12 (codex): ${label} marked uneditable and left untouched`,
+      r12.exitCode === 0 && (await readFile(cfg12, 'utf-8')) === init12 && o12.text().includes('cannot edit safely'))
+  }
+
+  // #13: setup codex accepts onboarding token with verified label "codex", rejects "claude-code" and "github-action"
+  const { validateEditorToken } = await import('../bin/setup-shared.mjs')
+  const makeLabelFetch = (label) => async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ valid: true, is_pro: false, is_payg: true, plan_code: 'payg', label }),
+  })
+  const { home: h13ok, codexHome: ch13ok, env: e13ok } = await newHome(false)
+  const r13ok = await rawRunSetupCodex([], {
+    stdout: makeCaptureStream().stream,
+    stderr: makeCaptureStream().stream,
+    env: { ...e13ok, MEGALENS_TOKEN: TOKEN_A },
+    home: h13ok,
+    isTTY: true,
+    tomlHelpers,
+    promptOverride: makePromptScript(['y', 'n']).promptOverride,
+    validateToken: (tok, opts) => validateEditorToken(tok, { ...opts, fetchImpl: makeLabelFetch('codex') }),
+  })
+  check('Astra CONFIRM10 #13 (codex): accepts onboarding token with verified label "codex"',
+    r13ok.exitCode === 0 && (await readFile(join(ch13ok, 'config.toml'), 'utf-8')).includes(`Bearer ${TOKEN_A}`))
+
+  const { home: h13bad, codexHome: ch13bad, env: e13bad } = await newHome(false)
+  const r13bad = await rawRunSetupCodex([], {
+    stdout: makeCaptureStream().stream,
+    stderr: makeCaptureStream().stream,
+    env: { ...e13bad, MEGALENS_TOKEN: TOKEN_A },
+    home: h13bad,
+    isTTY: true,
+    tomlHelpers,
+    promptOverride: makePromptScript(['y', 'n']).promptOverride,
+    validateToken: (tok, opts) => validateEditorToken(tok, { ...opts, fetchImpl: makeLabelFetch('claude-code') }),
+  })
+  const exists13bad = await readFile(join(ch13bad, 'config.toml'), 'utf-8').then(() => true, () => false)
+  check('Astra CONFIRM10 #13 (codex): rejects mismatched tool label "claude-code" with exit 1 and zero writes',
+    r13bad.exitCode === 1 && !exists13bad)
+
+  // Fix round 12 (Astra CONFIRM11 #11 concurrent edit during backup & #12 headers_helper/oauth):
+  const { home: h12b, codexHome: ch12b, env: e12b } = await newHome(false)
+  await mkdir(ch12b, { recursive: true })
+  const cfg12b = join(ch12b, 'config.toml')
+  await writeFile(cfg12b, 'model = "o3"\n')
+  const shimDir12 = join(h12b, 'git-shim')
+  await mkdir(shimDir12, { recursive: true })
+  const countFile12 = join(h12b, 'git-count')
+  const concurrentBackupToml = 'model = "o3"\n\n[mcp_servers.second]\nurl = "https://second.example"\n'
+  await writeFile(join(shimDir12, 'git'), [
+    `#!${process.execPath}`,
+    "import { readFileSync, writeFileSync } from 'node:fs'",
+    `const countFile = ${JSON.stringify(countFile12)}`,
+    `const cfgPath = ${JSON.stringify(cfg12b)}`,
+    `const payload = ${JSON.stringify(concurrentBackupToml)}`,
+    'let n = 0',
+    'try { n = Number(readFileSync(countFile, "utf-8").trim()) || 0 } catch {}',
+    'n += 1',
+    'writeFileSync(countFile, String(n))',
+    'if (n === 2) writeFileSync(cfgPath, payload)',
+    'process.stderr.write("fatal: not a git repository\\n")',
+    'process.exit(128)',
+    '',
+  ].join('\n'), { mode: 0o755 })
+  const r12b = await runSetupCodex([], {
+    stdout: makeCaptureStream().stream,
+    stderr: makeCaptureStream().stream,
+    env: { ...e12b, PATH: `${shimDir12}:${e12b.PATH ?? ''}`, MEGALENS_TOKEN: TOKEN_A },
+    home: h12b,
+    isTTY: true,
+    tomlHelpers,
+    promptOverride: makePromptScript(['y', 'n']).promptOverride,
+  })
+  const after12b = await readFile(cfg12b, 'utf-8')
+  check('Astra CONFIRM11 #11 (codex): second server saved during backup is preserved after recheck/re-merge',
+    r12b.exitCode === 0 &&
+    after12b.includes('[mcp_servers.second]') &&
+    after12b.includes('[mcp_servers.megalens]') &&
+    after12b.includes(`Bearer ${TOKEN_A}`))
+
+  for (const [label, extraToml] of [
+    ['headers_helper', 'headers_helper = "/usr/local/bin/proxy-headers.sh"'],
+    ['oauth subtable', '[mcp_servers.megalens.oauth]\nclient_secret = "proxy-secret"'],
+  ]) {
+    const { home: h12h, codexHome: ch12h, env: e12h } = await newHome(false)
+    await mkdir(ch12h, { recursive: true })
+    const cfg12h = join(ch12h, 'config.toml')
+    const init12h = `[mcp_servers.megalens]\nurl = "https://other.example/mcp"\n${extraToml}\n`
+    await writeFile(cfg12h, init12h)
+    const o12h = makeCaptureStream()
+    const r12h = await runSetupCodex(['--replace-token'], {
+      stdout: o12h.stream,
+      stderr: makeCaptureStream().stream,
+      env: { ...e12h, MEGALENS_TOKEN: TOKEN_B },
+      home: h12h,
+      isTTY: true,
+      tomlHelpers,
+      promptOverride: makePromptScript(['n']).promptOverride,
+    })
+    check(`Astra CONFIRM11 #12 (codex): ${label} marked uneditable and left untouched`,
+      r12h.exitCode === 0 && (await readFile(cfg12h, 'utf-8')) === init12h && o12h.text().includes('cannot edit safely'))
+  }
 }
 
 await rm(root, { recursive: true, force: true })

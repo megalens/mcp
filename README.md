@@ -6,7 +6,7 @@ what could break. Use it alongside your current reviewer.
 Works with Claude Code, Codex CLI, Cursor, Gemini CLI and Lovable, and with any tool that supports
 OAuth MCP connectors, such as ChatGPT and Claude.ai. GitHub Copilot is coming soon.
 
-Your first Standard review is free, with no card.
+Your first 3 Standard reviews are free, with no card.
 
 ## Quick Start
 
@@ -15,9 +15,20 @@ npx megalens-mcp setup
 ```
 
 The setup wizard:
-1. Asks for your MegaLens token ([get one here](https://megalens.ai/app/settings/mcp))
-2. Detects installed tools automatically
-3. Writes the correct config for each tool
+1. Detects installed tools and asks which to set up
+2. Opens megalens.ai in your browser: sign in, check the code matches your terminal, click Approve
+   (over SSH or without a browser it prints the link; open it on any device)
+3. Writes the new editor token straight into each tool's config. You never see or copy it.
+
+After you approve, the terminal shows the account you approved with and asks you to confirm it
+before any token is made. Setup never reads or reuses a token already in a config: every run
+makes a new editor token through the browser, and every tool you choose gets it. If you keep a tool
+that already has MegaLens, setup will not replace your editor token (that tool may be using it):
+if the browser approval would replace it, setup stops before anything is created or revoked. A
+config file inside a git repository (and not ignored there) is only written if you say yes.
+
+`npx megalens-mcp setup --manual` keeps the old way: paste a token from
+[MCP Setup](https://megalens.ai/app/settings/mcp). The token is not shown while you paste it.
 
 
 ## Supported Tools
@@ -30,7 +41,7 @@ The setup wizard:
 | Gemini CLI | Supported | `~/.gemini/settings.json` | Yes |
 | Lovable | Supported | None (a form in Lovable) | No, see below |
 | ChatGPT, Claude.ai and other OAuth connectors | Any tool that supports OAuth MCP connectors | None (a connector in the app) | No, see below |
-| GitHub Copilot (VS Code) | **Coming soon**, not supported yet | `.vscode/mcp.json` | Only if that file already exists in the folder you run the wizard from |
+| GitHub Copilot (VS Code) | **Coming soon**, not supported yet | Your VS Code user `mcp.json` (Linux `~/.config/Code/User/mcp.json`, macOS `~/Library/Application Support/Code/User/mcp.json`, Windows `%APPDATA%\Code\User\mcp.json`) | Only if that file already exists. Never the project's `.vscode/mcp.json`: that file is often committed, and the token would go with it |
 
 If no tool is detected, the wizard lets you pick one and creates the config file. The wizard can also
 write configs for Windsurf and Grok Build. Those are not supported or tested.
@@ -77,7 +88,11 @@ Or in `.mcp.json` (project) / `~/.claude.json` (user):
 
 ### Cursor
 
-`~/.cursor/mcp.json` or `.cursor/mcp.json`. **No `type` field.** Cursor does not use one:
+`~/.cursor/mcp.json` or `.cursor/mcp.json`. **No `type` field.** Cursor does not use one.
+
+`npx megalens-mcp setup` writes only `~/.cursor/mcp.json`. It never writes a project `.cursor/mcp.json` (those are often committed). If one in the current folder or above has a MegaLens entry, setup will not replace your editor token, so that project keeps working. Before any replace, setup also asks in the terminal (default no).
+
+The entry:
 
 ```json
 {
@@ -111,7 +126,7 @@ Or in `.mcp.json` (project) / `~/.claude.json` (user):
 
 ### GitHub Copilot in VS Code (coming soon, not supported yet)
 
-GitHub Copilot is coming soon. If you want to try it early: `.vscode/mcp.json`. **The top-level key
+GitHub Copilot is coming soon. If you want to try it early, use your VS Code **user** `mcp.json` (see the table above), not the project's `.vscode/mcp.json`, which is often committed with the project. **The top-level key
 is `servers`, not `mcpServers`.** A config written for Claude Code or Cursor will not be read here:
 
 ```json
@@ -140,10 +155,10 @@ http_headers = { "Authorization" = "Bearer ml_tok_your_token_here" }
 
 ### Paying for reviews
 
-Your first Standard review is free, with no card. After that, a review uses credits.
+Your first 3 Standard reviews are free, with no card. After that, a review uses credits.
 
 - Plans give you credits every month: Plus $19 a month for 20 credits, Pro $69 for 80, Max $199 for 250.
-- Pay as you go: $1.25 a credit, from $10 (8 credits), no extra fee. Credits you buy never expire.
+- Pay as you go: $1.25 a credit, from $5 (4 credits), no extra fee. Credits you buy never expire.
 - A Standard review uses 1 credit and a Deep review uses 8. Reviews from this connector use 1 to 3
   credits, depending on the size of what you send.
 
@@ -153,10 +168,11 @@ See [current pricing](https://megalens.ai/pricing).
 
 | Command | Description |
 |---------|-------------|
-| `megalens-mcp setup` | Interactive setup: detect tools, write config |
+| `megalens-mcp setup` | Browser sign-in; the token goes straight into your tools' configs |
+| `megalens-mcp setup --manual` | Same, but you paste a token |
 | `megalens-mcp setup codex` | Interactive Codex setup (`config.toml` + `AGENTS.md`) |
-| `megalens-mcp setup claude-code` | Interactive Claude Code setup (`claude mcp add` + `CLAUDE.md`) |
-| `megalens-mcp setup antigravity` | Interactive Antigravity setup (`agy mcp add` + `GEMINI.md`), alias `setup agy` |
+| `megalens-mcp setup claude-code` | Interactive Claude Code setup (writes `~/.claude.json` directly + `CLAUDE.md`) |
+| `megalens-mcp setup antigravity` | Interactive Antigravity setup (writes `~/.gemini/config/mcp_config.json` directly + `GEMINI.md`), alias `setup agy` |
 | `megalens-mcp validate` | Test your token connectivity |
 | `megalens-mcp config` | Show current config status |
 
@@ -195,10 +211,9 @@ Usage:
 npx megalens-mcp setup claude-code [--remove-line] [--dry-run] [-h|--help]
 ```
 
-- Uses `$CLAUDE_CONFIG_DIR` if set, otherwise `~/.claude`, for `CLAUDE.md`.
-- Reads `MEGALENS_TOKEN` from the environment or prompts for your token without echoing it.
-- Shows the masked `claude mcp add --scope user --transport http megalens "https://megalens.ai/api/mcp?ide=claude-code" --header "Authorization: Bearer ..."` command and runs `claude` only after you type `y` (default No). If `megalens` already exists (`claude mcp get megalens`), asks separately whether to replace it (`claude mcp remove --scope user megalens` then `add`).
-- If `claude` is not on `PATH`, writes nothing and prints the manual command and setup link (`https://megalens.ai/integrations/claude-code`).
+- Uses `$CLAUDE_CONFIG_DIR` if set, otherwise `~/.claude`, for `CLAUDE.md`, and `$CLAUDE_CONFIG_DIR/.claude.json` (or `~/.claude.json`) for the MCP config.
+- Reads `MEGALENS_TOKEN` from the environment or prompts for your verified Editor token (`default` label) without echoing it.
+- Writes the private JSON config directly (atomic, mode `0600`, preserving existing settings and servers; never passes the token in child-process arguments). Backups of files inside git repositories are stored outside the repository.
 - Asks separately (default No) before appending the missing MegaLens review lines to `$CLAUDE_CONFIG_DIR/CLAUDE.md` (or `~/.claude/CLAUDE.md`), saving a `.bak-*` backup and preserving line endings and permissions. Use `--remove-line` to remove those lines later.
 
 ### `setup antigravity` (alias `setup agy`)
@@ -210,9 +225,9 @@ npx megalens-mcp setup antigravity [--remove-line] [--dry-run] [-h|--help]
 npx megalens-mcp setup agy [--remove-line] [--dry-run] [-h|--help]
 ```
 
-- Reads `MEGALENS_TOKEN` from the environment or prompts for your token without echoing it.
-- Checks `~/.gemini/config/mcp_config.json` (read-only). If that file is invalid JSON, it leaves everything for Antigravity untouched and says so. If `megalens` is already configured, asks separately whether to replace it (`agy mcp remove megalens` then `add`, default No).
-- Shows the masked `agy mcp add --header "Authorization: Bearer ..." megalens "https://megalens.ai/api/mcp?ide=antigravity"` command and runs `agy` only after you type `y` (default No). If `agy` is not on `PATH`, writes nothing and prints the manual command and setup link (`https://megalens.ai/integrations/antigravity`).
+- Reads `MEGALENS_TOKEN` from the environment or prompts for your verified Editor token (`default` label) without echoing it.
+- Checks `~/.gemini/config/mcp_config.json`. If that file is invalid JSON, leaves everything for Antigravity untouched and says so.
+- Writes `~/.gemini/config/mcp_config.json` directly (atomic, mode `0600`, preserving existing settings and servers; never passes the token in child-process arguments). Backups of files inside git repositories are stored outside the repository.
 - Asks separately (default No) before appending the missing MegaLens review lines to `~/.gemini/GEMINI.md`, saving a `.bak-*` backup and preserving line endings and permissions. Gemini CLI also reads `~/.gemini/GEMINI.md`, so those lines affect Gemini CLI too. Use `--remove-line` to remove those lines later.
 
 ## How It Works
@@ -226,7 +241,7 @@ next. Results vary from run to run, so use MegaLens alongside your current revie
 ## Requirements
 
 - Node.js 18+ (only for the setup wizard; manual setup needs nothing)
-- A MegaLens account: [megalens.ai](https://megalens.ai). Your first Standard review is free, with no card
+- A MegaLens account: [megalens.ai](https://megalens.ai). Your first 3 Standard reviews are free, with no card
 
 ## Links
 
