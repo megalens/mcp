@@ -5,21 +5,15 @@ import { spawnSync } from 'node:child_process'
 import { basename, dirname, join } from 'node:path'
 import { homedir, tmpdir } from 'node:os'
 import { createInterface } from 'node:readline'
+import { MEGALENS_REVIEW_LINE, MEGALENS_REVIEW_LINE_V1, DECISION_LINE, DECISION_LINE_V1, DECISION_LINE_V2 } from './review-guidance.mjs'
 
 export const API_BASE = 'https://megalens.ai'
 export const VALIDATE_URL = `${API_BASE}/api/mcp/validate`
 
-export const MEGALENS_REVIEW_LINE =
-  'After you change code that handles money, sign-in, user data or database migrations, and before the user commits it, offer a MegaLens review and wait for a yes before running it.'
-
-export const DECISION_LINE =
-  'Before you or the user settle a decision that is hard to undo (choosing a database or data model, adding sign-in or payments, picking a major library or architecture), starting a new project, or doing deep research, offer a MegaLens review once for that task and wait for a yes before running it. Do not offer it for small questions or routine edits.'
-
-export const DECISION_LINE_V1 =
-  'When the user is making a decision that is hard to undo (a data model, architecture, security, a major dependency), starting a new project, or asking for deep research, offer a MegaLens review once for that task and wait for a yes before running it. Do not offer it for small questions or routine edits.'
+export { MEGALENS_REVIEW_LINE, DECISION_LINE, DECISION_LINE_V1 }
 
 export const MEGALENS_INSTRUCTION_LINES = [MEGALENS_REVIEW_LINE, DECISION_LINE]
-export const REMOVABLE_INSTRUCTION_LINES = [MEGALENS_REVIEW_LINE, DECISION_LINE, DECISION_LINE_V1]
+export const REMOVABLE_INSTRUCTION_LINES = [MEGALENS_REVIEW_LINE, DECISION_LINE, MEGALENS_REVIEW_LINE_V1, DECISION_LINE_V1, DECISION_LINE_V2]
 
 export const TOKEN_REGEX = /^ml_tok_[0-9a-f]{32}$/i
 export const MASKED_TOKEN = 'ml_tok_****'
@@ -48,12 +42,12 @@ function isV1DecisionLine(trimmed) {
 }
 
 function isV2DecisionLine(trimmed) {
-  return trimmed === DECISION_LINE || DECISION_V2_PATTERN.test(trimmed)
+  return trimmed.includes(DECISION_LINE) || DECISION_V2_PATTERN.test(trimmed)
 }
 
 function isCodeReviewLine(trimmed) {
   return (
-    trimmed === MEGALENS_REVIEW_LINE ||
+    trimmed.includes(MEGALENS_REVIEW_LINE) ||
     OLD_LINE_PATTERN.test(trimmed) ||
     (
       OFFER_REVIEW_PATTERN.test(trimmed) &&
@@ -932,6 +926,8 @@ export function planInstructionLineUpdates(content, { exists = true, platform = 
   }
 
   const hasV2 = hasMegaLensDecisionLine(content)
+  const updatedLines = new Set(MEGALENS_INSTRUCTION_LINES.filter(line => content.includes(line)))
+  const upgrades = [[MEGALENS_REVIEW_LINE_V1, MEGALENS_REVIEW_LINE], [DECISION_LINE_V2, DECISION_LINE]]
 
   const lines = content.split('\n')
   const nextLines = []
@@ -945,9 +941,31 @@ export function planInstructionLineUpdates(content, { exists = true, platform = 
     const hadCr = raw.endsWith('\r')
     const noCr = hadCr ? raw.slice(0, -1) : raw
     const hasBom = i === 0 && noCr.startsWith('\uFEFF')
-    const noBom = hasBom ? noCr.slice(1) : noCr
-    const trimmed = noBom.trim()
+    let noBom = hasBom ? noCr.slice(1) : noCr
 
+    let upgraded = false
+    for (const [oldLine, nextLine] of upgrades) {
+      while (noBom.includes(oldLine)) {
+        upgraded = true
+        const start = noBom.indexOf(oldLine)
+        const prefix = noBom.slice(0, start)
+        const suffix = noBom.slice(start + oldLine.length)
+        if (!updatedLines.has(nextLine)) {
+          updatedLines.add(nextLine)
+          replacements.push({ from: oldLine, to: nextLine })
+          noBom = `${prefix}${nextLine}${suffix}`
+        } else {
+          removals.push(oldLine)
+          noBom = joinAfterCut(prefix, suffix)
+        }
+      }
+    }
+    if (upgraded && BULLET_QUOTE_WS_PUNCT_ONLY.test(noBom)) {
+      if (hasBom) removedBom = true
+      continue
+    }
+
+    const trimmed = noBom.trim()
     const exactIdx = noBom.indexOf(DECISION_LINE_V1)
     if (exactIdx !== -1) {
       if (!hasV2 && !replacedFirstV1) {
@@ -1001,7 +1019,7 @@ export function planInstructionLineUpdates(content, { exists = true, platform = 
       }
     }
 
-    nextLines.push(raw)
+    nextLines.push(upgraded ? `${hasBom ? '\uFEFF' : ''}${noBom}${hadCr ? '\r' : ''}` : raw)
   }
 
   let intermediate = nextLines.join('\n')

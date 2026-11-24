@@ -19,6 +19,7 @@ import {
   runSetupCodex as rawRunSetupCodex,
 } from '../bin/codex-setup.mjs'
 import { planInstructionLineUpdates } from '../bin/setup-shared.mjs'
+import { DECISION_LINE_V2, MEGALENS_REVIEW_LINE_V1 } from '../bin/review-guidance.mjs'
 
 const okDefaultValidator = async () => ({ ok: true, isPro: false, isPayg: true, planCode: 'test', label: 'default' })
 const runSetupCodex = (args = [], io = {}) => rawRunSetupCodex(args, { validateToken: okDefaultValidator, ...io })
@@ -1211,6 +1212,17 @@ async function newHome(useDefaultHome = false) {
 
 // ── 23. Two-line detection & partial AGENTS.md states (0.3.9) ────────────────
 {
+  const legacy = `\uFEFF# Rules\r\n- ${MEGALENS_REVIEW_LINE_V1} ${DECISION_LINE_V2}\r\n${DECISION_LINE_V1}\r\n# Keep this line\r\n`
+  const upgraded = planInstructionLineUpdates(legacy)
+  check('setup upgrades both shipped offer rules and removes the older decision line',
+    upgraded.hasChanges && upgraded.replacements.length === 2 && upgraded.removals.length === 1 &&
+    upgraded.nextContent === `\uFEFF# Rules\r\n- ${CODEX_AGENTS_LINE} ${DECISION_LINE}\r\n# Keep this line\r\n` &&
+    !planInstructionLineUpdates(upgraded.nextContent).hasChanges)
+  check('setup limits offers for both plans and changes, with both opt outs',
+    CODEX_AGENTS_LINE.includes('Offer a MegaLens review at most once per task, even if the task has both a plan and code changes.') &&
+    CODEX_AGENTS_LINE.includes('Skip the offer if the task came from a MegaLens fix prompt or the user says “just fix it” or otherwise asks you to proceed without a review.') &&
+    DECISION_LINE.includes('Follow the same rules for offers and permission.'))
+
   // Unit checks for separate detection of old vs new line
   check('detection tells old and new lines apart: old only',
     hasMegaLensAgentsLine(`${CODEX_AGENTS_LINE}\r\n`) &&
