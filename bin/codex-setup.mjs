@@ -338,6 +338,7 @@ function inspectHttpHeadersInlineTable(headerLines) {
   entries.push(inner.slice(start))
 
   const keys = []
+  let authorization = null
   for (const rawEntry of entries) {
     const entry = rawEntry.trim()
     if (!entry) continue
@@ -345,10 +346,41 @@ function inspectHttpHeadersInlineTable(headerLines) {
     if (entryEq === -1) return { valid: false, keys: [] }
     const keyParts = splitTomlDottedKey(entry.slice(0, entryEq))
     if (!keyParts || keyParts.length !== 1) return { valid: false, keys: [] }
-    keys.push(keyParts[0].name)
+    const key = keyParts[0].name
+    if (keys.includes(key)) return { valid: false, keys: [] }
+    keys.push(key)
+    if (key === 'Authorization') {
+      authorization = readSingleLineTomlString(entry.slice(entryEq + 1))
+    }
   }
 
-  return { valid: true, keys }
+  return { valid: true, keys, authorization }
+}
+
+function readSingleLineTomlString(value) {
+  const literal = /^'([^'\r\n]*)'$/.exec(value.trim())
+  if (literal) return literal[1]
+  const basic = /^"(?:[^"\\\r\n]|\\.)*"$/.exec(value.trim())
+  if (!basic) return null
+  try {
+    return JSON.parse(basic[0])
+  } catch {
+    return null
+  }
+}
+
+export function readCodexMcpCredentials(info) {
+  const { lines, megalensStartIdx, megalensEndIdx, urlIdx, httpHeadersIdx, httpHeadersEndIdx } = info
+  if (info.unparseable || info.uneditable || megalensStartIdx < 0 ||
+      urlIdx <= megalensStartIdx || urlIdx > megalensEndIdx) return null
+
+  const [urlLine] = stripTomlCommentsFromLines([lines[urlIdx]])
+  const url = readSingleLineTomlString(urlLine.slice(findTopLevelEquals(urlLine) + 1))
+  const authorization = httpHeadersIdx > megalensStartIdx &&
+    httpHeadersEndIdx >= httpHeadersIdx && httpHeadersEndIdx <= megalensEndIdx
+    ? inspectHttpHeadersInlineTable(lines.slice(httpHeadersIdx, httpHeadersEndIdx + 1)).authorization
+    : null
+  return { url, authorization }
 }
 
 /** Split a tomlHeaderPath string on unescaped dots (Astra FINAL #6: quoted keys may contain dots/brackets). */

@@ -6,7 +6,7 @@ what could break. Use it alongside your current reviewer.
 Works with Claude Code, Codex CLI, Cursor, Gemini CLI and Lovable, and with any tool that supports
 OAuth MCP connectors, such as ChatGPT and Claude.ai. GitHub Copilot is coming soon.
 
-Your first 3 Standard reviews are free, with no card.
+3 reviews free, no card. Applies to Standard reviews.
 
 ## Quick Start
 
@@ -155,7 +155,7 @@ http_headers = { "Authorization" = "Bearer ml_tok_your_token_here" }
 
 ### Paying for reviews
 
-Your first 3 Standard reviews are free, with no card. After that, a review uses credits.
+3 reviews free, no card. Applies to Standard reviews. After that, a review uses credits.
 
 - Plans give you credits every month: Plus $19 a month for 20 credits, Pro $69 for 80, Max $199 for 250.
 - Pay as you go: $1.25 a credit, from $5 (4 credits), no extra fee. Credits you buy never expire.
@@ -241,7 +241,7 @@ next. Results vary from run to run, so use MegaLens alongside your current revie
 ## Requirements
 
 - Node.js 18+ (only for the setup wizard; manual setup needs nothing)
-- A MegaLens account: [megalens.ai](https://megalens.ai). Your first 3 Standard reviews are free, with no card
+- A MegaLens account: [megalens.ai](https://megalens.ai). 3 reviews free, no card
 
 ## Links
 

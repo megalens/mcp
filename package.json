@@ -1,6 +1,6 @@
 {
   "name": "megalens-mcp",
-  "version": "0.3.12",
+  "version": "0.3.13",
   "description": "MegaLens setup wizard: connects your IDE to the hosted MegaLens MCP server.",
   "license": "MIT",
   "author": "MegaLens.ai <hello@megalens.ai>",
@@ -25,6 +25,7 @@
     "ai-code-review"
   ],
   "bin": {
+    "megalens": "./bin/cli.mjs",
     "megalens-mcp": "./bin/cli.mjs"
   },
   "type": "module",

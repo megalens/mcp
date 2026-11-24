@@ -23,6 +23,7 @@ import { runSetupCodex, resolveCodexHome, inspectCodexConfig, buildHttpHeadersRe
 import { runSetupClaudeCode, runSetupAntigravity, resolveClaudeConfigDir, resolveClaudeMcpConfigPath } from './host-setup.mjs'
 import { maskTokenSecrets, MASKED_TOKEN, TOKEN_REGEX, answerIsYes, readHiddenLine, backupExistingFile, makeTimestamp, gitTrackable, realLocation, mergeMcpServerEntry, readOptionalFile, verifyFileVersion, writeFileAtomicPreservingMode } from './setup-shared.mjs'
 import { deviceLogin, DeviceLoginError } from './device-login.mjs'
+import { runInstall, runUninstall } from './installer.mjs'
 
 const API_BASE = 'https://megalens.ai'
 const MCP_URL = `${API_BASE}/api/mcp`
@@ -1392,9 +1393,11 @@ async function cmdConfig() {
 // ── Main ──
 
 const HELP_TEXT = `
-  Usage: megalens-mcp <command>
+  Usage: megalens <command>
 
   Commands:
+    install              Sign in through the browser, register detected AI tools, check GitHub
+    uninstall            Remove MegaLens from your tools, revoke this install token, remove launchers
     setup                Sign in through the browser; the token goes straight into your tools
     setup --manual       Same, but paste a token from megalens.ai/app/settings/mcp
     setup codex          Interactive Codex setup (config.toml + AGENTS.md)
@@ -1412,6 +1415,22 @@ const cmd = process.argv[2] || 'setup'
 
 try {
 switch (cmd) {
+  case 'install': {
+    const result = await runInstall(process.argv.slice(3), {
+      askAccount,
+      askYes,
+      tomlHelpers: { scanTomlLine, tomlHeaderPath, stripTomlTable },
+    })
+    if (result.exitCode) process.exitCode = result.exitCode
+    break
+  }
+  case 'uninstall': {
+    const result = await runUninstall(process.argv.slice(3), {
+      tomlHelpers: { scanTomlLine, tomlHeaderPath, stripTomlTable },
+    })
+    if (result.exitCode) process.exitCode = result.exitCode
+    break
+  }
   case 'setup': {
     const target = process.argv[3]
     if (target === 'codex') {
